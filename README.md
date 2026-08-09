@@ -35,8 +35,6 @@ go install github.com/Lucky3028/cos/cmd/cos@latest
 mise run build
 ```
 
-これは全パッケージのビルド確認を行います。
-
 ## 使い方
 
 ```sh
