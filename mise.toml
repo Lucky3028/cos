@@ -5,6 +5,10 @@ depends = ["ci"]
 description = "Build all Go packages"
 run = "go build ./..."
 
+[tasks.install]
+description = "Install cos"
+run = "go install ./cmd/cos"
+
 [tasks.test]
 description = "Run all tests"
 run = "go test ./..."
