@@ -40,6 +40,11 @@ type deleteCheckMsg struct {
 	err          error
 }
 
+type resumeCheckMsg struct {
+	conversation Conversation
+	err          error
+}
+
 type model struct {
 	store SessionStore
 	cwd   string
@@ -60,14 +65,17 @@ type model struct {
 	hasConversation bool
 	viewport        viewport.Model
 
-	loading        bool
-	searching      bool
-	query          string
-	confirmDelete  bool
-	checkingDelete bool
-	err            error
-	width          int
-	height         int
+	loading         bool
+	searching       bool
+	query           string
+	confirmDelete   bool
+	checkingDelete  bool
+	checkingResume  bool
+	resumeRequested bool
+	resumeSession   Thread
+	err             error
+	width           int
+	height          int
 }
 
 func newModel(store SessionStore, cwd string) model {
@@ -102,6 +110,16 @@ func checkDelete(store SessionStore, id string) tea.Cmd {
 		}
 		conversation, err := store.Read(context.Background(), id)
 		return deleteCheckMsg{conversation: conversation, err: err}
+	}
+}
+
+func checkResume(store SessionStore, id string) tea.Cmd {
+	return func() tea.Msg {
+		if hasActiveWriter(id) {
+			return resumeCheckMsg{conversation: Conversation{Thread: Thread{ID: id, Active: true}}}
+		}
+		conversation, err := store.Read(context.Background(), id)
+		return resumeCheckMsg{conversation: conversation, err: err}
 	}
 }
 
@@ -177,6 +195,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case resumeCheckMsg:
+		m.checkingResume = false
+		m.err = msg.err
+		if msg.err == nil {
+			if msg.conversation.Thread.Active {
+				m.err = sessionInUseError()
+				return m, nil
+			}
+			if thread, ok := m.selectedThread(); ok {
+				// Keep the cwd from the list response, which is the saved cwd
+				// used to launch the session. Some read responses omit it.
+				if thread.CWD == "" {
+					thread.CWD = msg.conversation.Thread.CWD
+				}
+				m.resumeSession = thread
+				m.resumeRequested = true
+				return m, tea.Quit
+			}
+		}
+		return m, nil
 	case deletedMsg:
 		m.confirmDelete = false
 		m.loading = false
@@ -209,7 +247,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	if key == "ctrl+c" || (key == "q" && !m.searching && !m.confirmDelete && !m.checkingDelete) {
+	if key == "ctrl+c" || (key == "q" && !m.searching && !m.confirmDelete && !m.checkingDelete && !m.checkingResume) {
 		return m, tea.Quit
 	}
 	if m.err != nil {
@@ -219,6 +257,9 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.checkingDelete {
+		return m, nil
+	}
+	if m.checkingResume {
 		return m, nil
 	}
 	if m.confirmDelete {
@@ -251,6 +292,21 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.applyFilter()
 		}
 		return m, nil
+	}
+	if key == "enter" {
+		if m.loading {
+			return m, nil
+		}
+		thread, ok := m.selectedThread()
+		if !ok {
+			return m, nil
+		}
+		if thread.Active {
+			m.err = sessionInUseError()
+			return m, nil
+		}
+		m.checkingResume = true
+		return m, checkResume(m.store, thread.ID)
 	}
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -326,7 +382,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.confirmDelete || m.checkingDelete || m.err != nil {
+	if m.confirmDelete || m.checkingDelete || m.checkingResume || m.err != nil {
 		return m, nil
 	}
 	leftWidth, _ := m.paneWidths()
@@ -532,6 +588,9 @@ func (m model) View() string {
 	if m.checkingDelete {
 		return overlayPopup(base, m.renderDeleteChecking(), m.width, m.height)
 	}
+	if m.checkingResume {
+		return overlayPopup(base, m.renderResumeChecking(), m.width, m.height)
+	}
 	if m.confirmDelete {
 		return overlayPopup(base, m.renderDeleteConfirmation(), m.width, m.height)
 	}
@@ -597,6 +656,20 @@ func (m model) renderDeleteChecking() string {
 	contentWidth := max(1, dialogWidth-4)
 	content := lipgloss.NewStyle().Bold(true).Render("Checking session…") + "\n\n" +
 		lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render("Please wait")
+	dialog := lipgloss.NewStyle().
+		Width(dialogWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#F59E0B")).
+		Padding(1, 2).
+		Render(content)
+	return dialog
+}
+
+func (m model) renderResumeChecking() string {
+	dialogWidth := min(52, max(1, m.width-8))
+	contentWidth := max(1, dialogWidth-4)
+	content := lipgloss.NewStyle().Bold(true).Render("Checking session…") + "\n\n" +
+		lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render("Preparing resume")
 	dialog := lipgloss.NewStyle().
 		Width(dialogWidth).
 		Border(lipgloss.RoundedBorder()).
@@ -785,11 +858,10 @@ func kindColor(kind string) lipgloss.Color {
 }
 
 func (m model) renderStatus() string {
-	muted := mutedText("j/k ↑/↓ select  Tab pane  / search  a scope  p preview  r reload  d delete  q quit")
 	if m.searching {
 		return "type to search  Enter apply  Esc cancel"
 	}
-	return muted
+	return mutedText("j/k ↑/↓ select  Tab pane  / search  a scope  p preview  r reload  Enter resume  d delete  q quit")
 }
 
 func deleteError(err error) error {
@@ -800,7 +872,7 @@ func deleteError(err error) error {
 }
 
 func sessionInUseError() error {
-	return fmt.Errorf("this session is currently in use and cannot be deleted")
+	return fmt.Errorf("this session is currently in use and cannot be deleted or resumed")
 }
 
 func mutedText(value string) string {

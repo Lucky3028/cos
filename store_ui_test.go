@@ -103,6 +103,103 @@ func TestActiveThreadCannotBeDeleted(t *testing.T) {
 	}
 }
 
+func TestIdleThreadEnterRequestsResumeAndQuits(t *testing.T) {
+	store := &fakeStore{
+		threads:          []Thread{{ID: "session", Title: "session", CWD: "/saved/work"}},
+		readConversation: Conversation{Thread: Thread{ID: "session", CWD: "/saved/work"}},
+	}
+	m := newModel(store, "/current/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil || !m.checkingResume {
+		t.Fatalf("resume check was not started: checking=%v cmd=%v", m.checkingResume, cmd != nil)
+	}
+	updated, quit := m.Update(cmd().(resumeCheckMsg))
+	m = updated.(model)
+	if quit == nil || !m.resumeRequested {
+		t.Fatalf("resume state = requested:%v quit:%v", m.resumeRequested, quit != nil)
+	}
+	if m.resumeSession.ID != "session" || m.resumeSession.CWD != "/saved/work" {
+		t.Fatalf("resume session = %#v", m.resumeSession)
+	}
+}
+
+func TestActiveThreadCannotBeResumed(t *testing.T) {
+	store := &fakeStore{threads: []Thread{{ID: "active", Active: true}}}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd != nil || m.resumeRequested || m.checkingResume {
+		t.Fatalf("active resume state = requested:%v checking:%v cmd:%v", m.resumeRequested, m.checkingResume, cmd != nil)
+	}
+	if m.err == nil || !strings.Contains(m.err.Error(), "currently in use") {
+		t.Fatalf("error = %v", m.err)
+	}
+}
+
+func TestWriterLockPreventsResume(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	lockDir := filepath.Join(codexHome, "thread-writer-locks")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(lockDir, "session.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeStore{threads: []Thread{{ID: "session"}}}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = store.threads
+	m.applyFilter()
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(model)
+	if cmd == nil || !m.checkingResume {
+		t.Fatalf("resume check was not started: checking=%v cmd=%v", m.checkingResume, cmd != nil)
+	}
+	updated, quit := m.Update(cmd().(resumeCheckMsg))
+	m = updated.(model)
+	if quit != nil || m.resumeRequested || m.err == nil {
+		t.Fatalf("locked resume state = requested:%v err:%v quit:%v", m.resumeRequested, m.err, quit != nil)
+	}
+}
+
+func TestEnterDoesNotResumeDuringModalOrSearch(t *testing.T) {
+	store := &fakeStore{threads: []Thread{{ID: "session"}}}
+	for name, setup := range map[string]func(*model){
+		"search":              func(m *model) { m.searching = true },
+		"delete confirmation": func(m *model) { m.confirmDelete = true },
+		"error":               func(m *model) { m.err = errors.New("error") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m := newModel(store, "/work")
+			m.loading = false
+			m.threads = store.threads
+			m.applyFilter()
+			setup(&m)
+			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			result := updated.(model)
+			if cmd != nil || result.resumeRequested || result.checkingResume {
+				t.Fatalf("resume started: requested:%v checking:%v cmd:%v", result.resumeRequested, result.checkingResume, cmd != nil)
+			}
+		})
+	}
+}
+
 func TestDeleteChecksForActiveThreadBeforeConfirmation(t *testing.T) {
 	store := &fakeStore{
 		threads:          []Thread{{ID: "session", Title: "session"}},
