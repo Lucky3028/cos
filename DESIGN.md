@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-`cos` は、Codex のセッションを TUI で一覧・閲覧・削除する Linux 向けツールである。
+`cos` は、Codex のセッションを TUI で一覧・閲覧・再開・削除する Linux 向けツールである。
 
 画面表示と本設計書での呼称は `session`（セッション）に統一する。Codex app-server の API 名（`thread/list` など）と、それに対応する内部型 `Thread` は外部仕様との対応を保つため変更しない。
 
@@ -16,6 +16,7 @@ Codex の JSONL ファイルは直接編集せず、`codex app-server --stdio` �
 - 全 session の一覧表示への切り替え
 - タイトル・preview・cwd による検索
 - session の会話内容の閲覧
+- 選択した session の `codex resume` への引き継ぎ
 - コマンド実行、ファイル変更、MCP 操作などの活動要約
 - 確認付きの session 完全削除
 
@@ -41,7 +42,7 @@ Codex の JSONL ファイルは直接編集せず、`codex app-server --stdio` �
 
 ### ファイル構成
 
-- `main.go`: CLI オプション、cwd の取得、TUI 起動
+- `main.go`: CLI オプション、cwd の取得、TUI 起動、Codex CLI への引き継ぎ
 - `types.go`: `Thread`、`Conversation`、`SessionStore` などのドメイン型
 - `rpc.go`: JSON-RPC クライアント、app-server プロセス管理
 - `store.go`: app-server API の呼び出しとレスポンス変換
@@ -94,7 +95,7 @@ type SessionStore interface {
 }
 ```
 
-API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を true にする。active session は一覧に表示するが削除できない。
+API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を true にする。active session は一覧に表示するが削除・再開できない。
 
 一覧の表示タイトルは、API の `name` を優先する。`name` が空の場合は
 `preview` を代替タイトルとして使用し、それも空の場合は `(untitled)` を表示する。
@@ -121,6 +122,7 @@ API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を
 | `a` | cwd 表示と全体表示の切り替え |
 | `p` | 右ペインの会話プレビュー表示・非表示 |
 | `r` | 再読み込み |
+| `Enter` | 選択中 session を再開 |
 | `d` | 削除確認 |
 | `y` | 削除実行 |
 | `n` / `Esc` | 削除確認・検索のキャンセル |
@@ -149,6 +151,8 @@ cwd 表示と全体表示では選択位置を独立して保持する。初め�
 
 `d` を押した時点で対象 session の writer lock と `thread/read` の最新状態を確認する。writer lock が取得できない、または active の場合は削除確認を表示せず、使用中で削除できないことをエラーポップアップで通知する。非 active かつ writer lock が空いている場合のみ削除確認を表示する。
 
+`Enter` を押した時点でも同じ確認を行う。writer lock が取得できない、または active の場合は 再開せず、削除・再開ともに使用中で実行できないことをエラーポップアップで通知する。非 active の場合は確認画面を表示せず TUI を終了する。
+
 削除確認は画面下部のステータス表示ではなく、一覧と会話プレビューを背景に
 残した中央ポップアップで表示する。対象 session のタイトルは最大 3 行まで
 表示し、確認文の上下には空行を入れる。`y` と `n / Esc` の選択肢はポップアップ
@@ -170,6 +174,11 @@ cos
 
 `CODEX_HOME` を含む環境変数は、app-server の子プロセスへそのまま継承する。
 
+再開要求で TUI が終了した後、app-server を閉じてから、保存された cwd が空でなければ
+`codex --cd <session.CWD> resume <session.ID>`、空なら `codex resume <session.ID>` を
+シェルを介さずに起動する。標準入出力と環境変数は継承する。Codex の起動失敗や終了エラーは
+標準エラー出力へ出し、終了ステータスを返す。
+
 ## 8. テストと検証
 
 次のコマンドで検証する。
@@ -189,6 +198,10 @@ go build ./...
 - 会話項目の変換と活動要約
 - タイトル・preview・cwd 検索
 - active session の削除禁止
+- idle session の Enter による 再開要求と TUI 終了
+- active session と writer lock 保持 session の 再開禁止
+- 保存 cwd と session ID を使った Codex CLI 起動
+- 検索中、削除確認中、エラーモーダル中の Enter による 再開非実行
 - scope ごとの選択位置保持
 - マウス操作、端末リサイズ、会話プレビュー切り替え
 - 中央削除確認ポップアップ
