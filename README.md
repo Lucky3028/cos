@@ -17,6 +17,7 @@ Codex のセッションを一覧・閲覧・再開・削除する Linux 向け 
 
 - Linux
 - Go 1.26 以降（ソースからビルドする場合）
+- mise（リポジトリからビルド・検証する場合）
 - `codex` コマンド
 - `codex app-server --stdio` を利用できる Codex CLI
 
@@ -31,10 +32,10 @@ go install github.com/Lucky3028/cos/cmd/cos@latest
 または、リポジトリを取得してビルドできます。
 
 ```sh
-go build -o cos ./cmd/cos
+mise run build
 ```
 
-ビルドした実行ファイルは `./cos` で起動できます。
+これは全パッケージのビルド確認を行います。
 
 ## 使い方
 
@@ -70,11 +71,13 @@ cos --version
 ## 開発
 
 ```sh
-go test ./...
-go test -race ./...
-go vet ./...
-go build ./...
+mise run test
+mise run test-race
+mise run vet
+mise run build
 ```
+
+すべての CI 用チェックは `mise run ci` で実行できます。
 
 
 設計の詳細は [docs/DESIGN.md](docs/DESIGN.md) と [docs/DETAIL_DESIGN.md](docs/DETAIL_DESIGN.md) を参照してください。
