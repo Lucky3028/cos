@@ -1,0 +1,38 @@
+[tasks.default]
+depends = ["ci"]
+
+[tasks.build]
+description = "Build all Go packages"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run all tests"
+run = "go test ./..."
+
+[tasks.test-race]
+description = "Run all tests with the race detector"
+run = "go test -race ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.fmt]
+description = "Format Go source files"
+run = "go fmt ./..."
+
+[tasks.check]
+description = "Run static checks and tests"
+depends = ["vet", "test"]
+
+[tasks.ci]
+description = "Run the full build and verification suite"
+depends = ["fmt", "build", "test-race", "vet"]
+
+[tasks.clean]
+description = "Remove Go build and test caches"
+run = "go clean"
+
+[tasks.run]
+description = "Run cos"
+run = "go run ."
