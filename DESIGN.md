@@ -20,11 +20,9 @@ Codex の JSONL ファイルは直接編集せず、`codex app-server --stdio` �
 - コマンド実行、ファイル変更、MCP 操作などの活動要約
 - 確認付きの session 完全削除
 
-`thread/delete` は対象 session の子孫も削除するため、cos は削除確認時と削除実行時に
-writer lock、最新状態、全階層の子孫を確認する。確認できない場合や子孫が見つかった
-場合は fail-closed とする。ただし app-server の削除APIには「子孫がない場合のみ削除」
-という原子的な事前条件がないため、別クライアントが確認後に子孫を生成する競合は
-cos 単独では完全に防げない。
+`thread/delete` は対象 session の子孫も削除するため、cos は削除確認時と削除実行時にwriter lock、最新状態、全階層の子孫を確認する。
+確認できない場合や子孫が見つかった場合は fail-closed とする。
+ただし app-server の削除APIには「子孫がない場合のみ削除」という原子的な事前条件がないため、別クライアントが確認後に子孫を生成する競合はcos 単独では完全に防げない。
 
 ### 対象外
 
@@ -71,11 +69,9 @@ cos 単独では完全に防げない。
 - `internal/lock/writer_lock.go`: writer lock の状態確認
 - 各ディレクトリの `*_test.go`: RPC、Store、UI、lock、CLI の責務別テスト
 
-パッケージ間の境界は次のとおりとする。`internal/domain` は共有するドメイン型と
-`SessionStore` を定義し、`internal/appserver` は `SessionStore` の実装として
-`NewDefaultStore`、`NewAppServerStore`、`AppServerStore.Close` を提供する。
-`internal/tui` は `NewModel(domain.SessionStore, cwd)` と
-`Model.ResumeSession()` を提供し、CLI は再開対象の session だけを受け取る。
+パッケージ間の境界は次のとおりとする。
+`internal/domain` は共有するドメイン型と`SessionStore` を定義し、`internal/appserver` は `SessionStore` の実装として`NewDefaultStore`、`NewAppServerStore`、`AppServerStore.Close` を提供する。
+`internal/tui` は `NewModel(domain.SessionStore, cwd)` と`Model.ResumeSession()` を提供し、CLI は再開対象の session だけを受け取る。
 
 ## 4. app-server 通信
 
@@ -105,36 +101,36 @@ codex app-server --stdio
 }
 ```
 
-cwd 表示では起動時に取得した絶対パスを `cwd` に指定する。全体表示では `cwd` を省略する。
-一覧は常に1ページ（最大100件）だけ取得し、`nextCursor` は UI が保持して次ページを
-要求する。前ページへ戻るため、UI は取得済みの開始 cursor の履歴だけを保持する。
+cwd 表示では起動時に取得した絶対パスを `cwd` に指定する。
+全体表示では `cwd` を省略する。
+一覧は常に1ページ（最大100件）だけ取得し、`nextCursor` は UI が保持して次ページを要求する。
+前ページへ戻るため、UI は取得済みの開始 cursor の履歴だけを保持する。
 
 検索時は thread/list のページを逐次走査し、title・preview・cwd を cos 側で照合する。
-一致が見つかった場合は、その app-server 1ページ内の一致をすべて1ページの検索結果として
-返す。一致しない app-server ページは読み飛ばす。最大100ページ（最大10,000 session）までとし、
-上限に達した場合は `ThreadPage.Incomplete` を設定して検索結果が不完全であることを UI に表示する。
-`ThreadListRequest.SearchPages` と `ThreadPage.ScannedPages` で、UI のページ移動をまたいで走査数を
-引き継ぐ。cursor の循環はエラーとして停止する。
+一致が見つかった場合は、その app-server 1ページ内の一致をすべて1ページの検索結果として返す。
+一致しない app-server ページは読み飛ばす。
+最大100ページ（最大10,000 session）までとし、上限に達した場合は `ThreadPage.Incomplete` を設定して検索結果が不完全であることを UI に表示する。
+`ThreadListRequest.SearchPages` と `ThreadPage.ScannedPages` で、UI のページ移動をまたいで走査数を引き継ぐ。
+cursor の循環はエラーとして停止する。
 
-app-server のバージョンによって `thread/list` の `data` は配列、または
-`{ "items": [...], "nextCursor": "..." }` のオブジェクトで返る場合がある。
+app-server のバージョンによって `thread/list` の `data` は配列、または`{ "items": [...], "nextCursor": "..." }` のオブジェクトで返る場合がある。
 通信層の境界で両方の形式を受け入れ、UI 層には同じ session 一覧として渡す。
 
-`thread/read` の `includeTurns: true` が利用できない app-server では、metadata-only の
-`thread/read` 後に `thread/turns/list` を使って会話をページ取得する。
+`thread/read` の `includeTurns: true` が利用できない app-server では、metadata-only の`thread/read` 後に `thread/turns/list` を使って会話をページ取得する。
 
 会話履歴は新しい turn から取得し、最大 100 turn、本文合計 1 MiB で読み込みを停止する。
-取得した turn は表示時に時系列順へ戻す。上限で省略した場合は `Conversation.Truncated`
-を設定し、右ペインに省略を表示する。`includeTurns: true` が使える旧サーバーでも、
-取得後に同じ上限を適用する。
+取得した turn は表示時に時系列順へ戻す。上限で省略した場合は `Conversation.Truncated`を設定し、右ペインに省略を表示する。
+`includeTurns: true` が使える旧サーバーでも、取得後に同じ上限を適用する。
 
-JSON-RPC の reader は、レスポンスの間に挿入される通知を無視して pending request に対応するレスポンスだけを返す。JSONL 1メッセージは改行を含め最大2 MiBとし、デコード前に超過を拒否する。app-server の終了、stdio の切断、不正JSON、メッセージ上限超過は、要求の完全な書き込み後なら結果不明として扱う。書き込み済み要求の応答タイムアウトも同じ削除結果照合経路に入り、書き込み前のキャンセル・失敗とは区別する。
+JSON-RPC の reader は、レスポンスの間に挿入される通知を無視して pending request に対応するレスポンスだけを返す。
+JSONL 1メッセージは改行を含め最大2 MiBとし、デコード前に超過を拒否する。
+app-server の終了、stdio の切断、不正JSON、メッセージ上限超過は、要求の完全な書き込み後なら結果不明として扱う。
+書き込み済み要求の応答タイムアウトも同じ削除結果照合経路に入り、書き込み前のキャンセル・失敗とは区別する。
 
-UI の各非同期操作には 30 秒の deadline を設定する。session 選択、scope 切り替え、再読み込み、
-削除・再開確認などで新しい操作を開始した場合、前の操作の context をキャンセルし、応答を待つ
-RPC の pending entry も削除する。stdio への書き込みがキャンセル時点で停止している場合は
-接続を閉じて書き込み goroutine を解放する。app-server プロセスの寿命は個別 request の context
-から分離し、接続が閉じた場合は次の操作で再接続する。
+UI の各非同期操作には 30 秒の deadline を設定する。
+session 選択、scope 切り替え、再読み込み、削除・再開確認などで新しい操作を開始した場合、前の操作の context をキャンセルし、応答を待つRPC の pending entry も削除する。
+stdio への書き込みがキャンセル時点で停止している場合は接続を閉じて書き込み goroutine を解放する。
+app-server プロセスの寿命は個別 request の context から分離し、接続が閉じた場合は次の操作で再接続する。
 
 ## 5. ドメインモデル
 
@@ -150,15 +146,13 @@ type SessionStore interface {
 ```
 
 `ThreadPage` は現在ページの session、`NextCursor`、今回走査した app-server ページ数を含む。
-通常一覧の UI 保持量は1ページに限定する。タイトル・preview・cwd の検索は検索上限に達した
-場合も、取得できた結果を表示しつつ不完全検索であることを通知する。
+通常一覧の UI 保持量は1ページに限定する。
+タイトル・preview・cwd の検索は検索上限に達した場合も、取得できた結果を表示しつつ不完全検索であることを通知する。
 
 API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を true にする。active session は一覧に表示するが削除・再開できない。
 
-一覧の表示タイトルは、API の `name` を優先する。`name` が空の場合は
-`preview` を代替タイトルとして使用し、それも空の場合は `(untitled)` を表示する。
-左ペインの `preview` は一覧用の短い概要であり、右ペインの conversation preview
-（会話プレビュー）とは別の概念として扱う。
+一覧の表示タイトルは、API の `name` を優先する。`name` が空の場合は `preview` を代替タイトルとして使用し、それも空の場合は `(untitled)` を表示する。
+左ペインの `preview` は一覧用の短い概要であり、右ペインの conversation preview （会話プレビュー）とは別の概念として扱う。
 
 会話変換では、ユーザー本文とアシスタント本文を表示する。reasoning と巨大な tool output は表示せず、次の項目は短い活動要約に変換する。
 
@@ -186,9 +180,7 @@ API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を
 | `n` / `Esc` | 削除確認・検索のキャンセル |
 | `q` / `Ctrl-C` | 終了 |
 
-マウスの左クリックで session またはペインを選択できる。ホイール操作では、
-左ペイン上では session 選択、右ペイン上では会話スクロールを行い、操作した
-ペインへフォーカスも移す。
+マウスの左クリックで session またはペインを選択できる。ホイール操作では、左ペイン上では session 選択、右ペイン上では会話スクロールを行い、操作したペインへフォーカスも移す。
 
 ### レイアウトとリサイズ
 
@@ -200,44 +192,41 @@ API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を
 - 配色はオレンジを基調とし、activity は灰色、assistant は黄色系、user は緑系で表示する。
 - ステータスバーには一時的な操作結果を表示せず、操作ヘルプのみを表示する。
 
-cwd 表示と全体表示では選択位置と cursor 履歴を独立して扱う。`j/k` が現在ページの
-端に到達したとき、次 cursor または履歴上の前 cursor があればページを取得する。
-終端では循環せず停止する。取得件数が異なる場合は、そのページの末尾を超えない範囲に補正する。
+cwd 表示と全体表示では選択位置と cursor 履歴を独立して扱う。
+`j/k` が現在ページの端に到達したとき、次 cursor または履歴上の前 cursor があればページを取得する。
+終端では循環せず停止する。
+取得件数が異なる場合は、そのページの末尾を超えない範囲に補正する。
 
-app-server 由来の title、preview、cwd、会話本文、activity summary、エラー文字列は、
-ANSI/OSC シーケンスと C0/C1/DEL 制御文字を除去してから表示する。会話本文の改行は保持し、
-一覧や activity などの単一行表示では空白へ正規化する。
+app-server 由来の title、preview、cwd、会話本文、activity summary、エラー文字列は、ANSI/OSC シーケンスと C0/C1/DEL 制御文字を除去してから表示する。
+会話本文の改行は保持し、一覧や activity などの単一行表示では空白へ正規化する。
 
 ### 削除確認
 
-`d` を押した時点で対象 session の writer lock、`thread/read` の最新状態、全階層の
-子孫を確認する。writer lock の確認に失敗した、active だった、子孫が存在した、
-または子孫確認に失敗した場合は削除確認を表示しない。非 active、writer lock が
-空いており、子孫が存在しないことを確認できた場合のみ削除確認を表示する。
+`d` を押した時点で対象 session の writer lock、`thread/read` の最新状態、全階層の子孫を確認する。
+writer lock の確認に失敗した、active だった、子孫が存在した、または子孫確認に失敗した場合は削除確認を表示しない。
+非 active、writer lock が空いており、子孫が存在しないことを確認できた場合のみ削除確認を表示する。
 
-`y` を押した時点でも同じ確認を再実行する。確認後に状態が変化した場合や、子孫・
-writer lock の検証に失敗した場合は `thread/delete` を呼ばない。
+`y` を押した時点でも同じ確認を再実行する。
+確認後に状態が変化した場合や、子孫・ writer lock の検証に失敗した場合は `thread/delete` を呼ばない。
 
-`Enter` を押した時点でも同じ確認を行う。writer lock が取得できない、または active の場合は 再開せず、削除・再開ともに使用中で実行できないことをエラーポップアップで通知する。非 active の場合は確認画面を表示せず TUI を終了する。
+`Enter` を押した時点でも同じ確認を行う。writer lock が取得できない、または active の場合は 再開せず、削除・再開ともに使用中で実行できないことをエラーポップアップで通知する。
+非 active の場合は確認画面を表示せず TUI を終了する。
 
-削除確認は画面下部のステータス表示ではなく、一覧と会話プレビューを背景に
-残した中央ポップアップで表示する。対象 session のタイトルは最大 3 行まで
-表示し、確認文の上下には空行を入れる。`y` と `n / Esc` の選択肢はポップアップ
-内の中央に揃える。
+削除確認は画面下部のステータス表示ではなく、一覧と会話プレビューを背景に残した中央ポップアップで表示する。
+対象 session のタイトルは最大 3 行まで表示し、確認文の上下には空行を入れる。
+`y` と `n / Esc` の選択肢はポップアップ内の中央に揃える。
 
-削除確認後に別の writer が session を使用し始める競合は、再確認または
-`thread/delete` のエラーとして検知する。書き込み済み削除要求の応答が timeout、接続終了、
-不正JSON、メッセージ上限超過になった場合は、新しい5秒 context で app-server に再接続し、
-`thread/read` を行う。不在を確認できた場合のみ成功扱いにし、存在、再接続失敗、照合不能は
-結果不明エラーとする。`thread/delete` は自動再実行しない。削除の成否にかかわらず同じ
-scope・ページを再取得し、現在の一覧が stale のまま残らないようにする。
+削除確認後に別の writer が session を使用し始める競合は、再確認または`thread/delete` のエラーとして検知する。
+書き込み済み削除要求の応答が timeout、接続終了、不正JSON、メッセージ上限超過になった場合は、新しい5秒 context で app-server に再接続し、`thread/read` を行う。
+不在を確認できた場合のみ成功扱いにし、存在、再接続失敗、照合不能は結果不明エラーとする。
+`thread/delete` は自動再実行しない。削除の成否にかかわらず同じscope・ページを再取得し、現在の一覧が stale のまま残らないようにする。
 
-子孫生成と削除の間の競合は、削除直前の再確認で窓を小さくするが、app-server のAPI仕様上
-完全な原子性は保証しない。
+子孫生成と削除の間の競合は、削除直前の再確認で窓を小さくするが、app-server のAPI仕様上、完全な原子性は保証しない。
 
 ### エラー表示
 
-app-server 通信、session の読み込み、削除などで発生したエラーは、ステータスバーではなく一覧と会話プレビューを背景に残した中央エラーポップアップで表示する。ポップアップは `Enter` または `Esc` で閉じる。
+app-server 通信、session の読み込み、削除などで発生したエラーは、ステータスバーではなく一覧と会話プレビューを背景に残した中央エラーポップアップで表示する。
+ポップアップは `Enter` または `Esc` で閉じる。
 
 ## 7. CLI
 
@@ -249,10 +238,9 @@ cos
 
 `CODEX_HOME` を含む環境変数は、app-server の子プロセスへそのまま継承する。
 
-再開要求で TUI が終了した後、app-server を閉じてから、保存された cwd が空でなければ
-`codex --cd <session.CWD> resume <session.ID>`、空なら `codex resume <session.ID>` を
-シェルを介さずに起動する。標準入出力と環境変数は継承する。Codex の起動失敗や終了エラーは
-標準エラー出力へ出し、終了ステータスを返す。
+再開要求で TUI が終了した後、app-server を閉じてから、保存された cwd が空でなければ `codex --cd <session.CWD> resume <session.ID>`、空なら `codex resume <session.ID>` を
+シェルを介さずに起動する。
+標準入出力と環境変数は継承する。Codex の起動失敗や終了エラーは標準エラー出力へ出し、終了ステータスを返す。
 
 ## 8. テストと検証
 
