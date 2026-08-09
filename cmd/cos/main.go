@@ -7,10 +7,11 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/Lucky3028/cos/internal/appserver"
+	"github.com/Lucky3028/cos/internal/domain"
+	"github.com/Lucky3028/cos/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
-
-const version = "0.1.0"
 
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -20,7 +21,7 @@ func main() {
 	}
 	flag.Parse()
 	if *showVersion {
-		fmt.Printf("cos %s\n", version)
+		fmt.Printf("cos %s\n", appserver.Version)
 		return
 	}
 
@@ -35,23 +36,27 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := NewDefaultStore()
+	store := appserver.NewDefaultStore()
 	defer func() { _ = store.Close() }()
-	program := tea.NewProgram(newModel(store, cwd), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(tui.NewModel(store, cwd), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	finalModel, err := program.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cos: %v\n", err)
 		os.Exit(1)
 	}
-	final, ok := finalModel.(model)
-	if !ok || !final.resumeRequested {
+	final, ok := finalModel.(tui.Model)
+	if !ok {
+		return
+	}
+	resumeSession, resumeRequested := final.ResumeSession()
+	if !resumeRequested {
 		return
 	}
 	if err := store.Close(); err != nil {
 		fmt.Fprintf(os.Stderr, "cos: close app-server before resume: %v\n", err)
 		os.Exit(1)
 	}
-	if err := runResume(final.resumeSession); err != nil {
+	if err := runResume(resumeSession); err != nil {
 		fmt.Fprintf(os.Stderr, "cos: resume: %v\n", err)
 		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() >= 0 {
 			os.Exit(exitErr.ExitCode())
@@ -60,7 +65,7 @@ func main() {
 	}
 }
 
-func resumeArgs(thread Thread) []string {
+func resumeArgs(thread domain.Thread) []string {
 	args := []string{"resume", thread.ID}
 	if thread.CWD != "" {
 		args = append([]string{"--cd", thread.CWD}, args...)
@@ -68,7 +73,7 @@ func resumeArgs(thread Thread) []string {
 	return args
 }
 
-func resumeCommand(command string, thread Thread) *exec.Cmd {
+func resumeCommand(command string, thread domain.Thread) *exec.Cmd {
 	cmd := exec.Command(command, resumeArgs(thread)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -76,6 +81,6 @@ func resumeCommand(command string, thread Thread) *exec.Cmd {
 	return cmd
 }
 
-func runResume(thread Thread) error {
+func runResume(thread domain.Thread) error {
 	return resumeCommand("codex", thread).Run()
 }
