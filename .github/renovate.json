@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>Lucky3028/renovate"],
+  "packageRules": [
+    {
+      "description": "Run go mod tidy after Go module updates",
+      "matchManagers": ["gomod"],
+      "postUpdateOptions": ["gomodTidy"]
+    }
+  ]
+}
