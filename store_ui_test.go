@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -67,15 +70,19 @@ func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 }
 
 type fakeStore struct {
-	threads   []Thread
-	deleted   []string
-	deleteErr error
+	threads          []Thread
+	readConversation Conversation
+	readErr          error
+	deleted          []string
+	deleteErr        error
 }
 
 func (f *fakeStore) List(context.Context, ListScope, string) ([]Thread, error) {
 	return append([]Thread(nil), f.threads...), nil
 }
-func (f *fakeStore) Read(context.Context, string) (Conversation, error) { return Conversation{}, nil }
+func (f *fakeStore) Read(context.Context, string) (Conversation, error) {
+	return f.readConversation, f.readErr
+}
 func (f *fakeStore) Delete(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return f.deleteErr
@@ -96,6 +103,51 @@ func TestActiveThreadCannotBeDeleted(t *testing.T) {
 	}
 }
 
+func TestDeleteChecksForActiveThreadBeforeConfirmation(t *testing.T) {
+	store := &fakeStore{
+		threads:          []Thread{{ID: "session", Title: "session"}},
+		readConversation: Conversation{Thread: Thread{ID: "session", Active: true}},
+	}
+	m := newModel(store, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, cmd := m.Update(keyMsg("d"))
+	m = updated.(model)
+	if cmd == nil || !m.checkingDelete {
+		t.Fatalf("delete check was not started: checking=%v cmd=%v", m.checkingDelete, cmd != nil)
+	}
+	updated, _ = m.Update(cmd().(deleteCheckMsg))
+	m = updated.(model)
+	if m.confirmDelete || m.checkingDelete || m.err == nil {
+		t.Fatalf("delete check state = confirm:%v checking:%v err:%v", m.confirmDelete, m.checkingDelete, m.err)
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("active session was deleted: %#v", store.deleted)
+	}
+	if !strings.Contains(m.View(), "currently in use") {
+		t.Fatalf("in-use error modal missing: %q", m.View())
+	}
+}
+
+func TestActiveWriterLockIsDetectedBeforeConfirmation(t *testing.T) {
+	lockDir := t.TempDir()
+	lockPath := filepath.Join(lockDir, "thread.lock")
+	file, err := os.Create(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	if !isLocked(lockPath) {
+		t.Fatal("active writer lock was not detected")
+	}
+}
+
 func TestDeleteErrorIsRenderedAsModal(t *testing.T) {
 	store := &fakeStore{
 		threads:   []Thread{{ID: "session", Title: "session"}},
@@ -106,13 +158,18 @@ func TestDeleteErrorIsRenderedAsModal(t *testing.T) {
 	m.threads = store.threads
 	m.applyFilter()
 
-	updated, _ := m.Update(keyMsg("d"))
+	updated, cmd := m.Update(keyMsg("d"))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("delete check was not started")
+	}
+	updated, _ = m.Update(cmd().(deleteCheckMsg))
 	m = updated.(model)
 	if !m.confirmDelete {
 		t.Fatal("delete confirmation did not open")
 	}
 
-	updated, cmd := m.Update(keyMsg("y"))
+	updated, cmd = m.Update(keyMsg("y"))
 	m = updated.(model)
 	if cmd == nil {
 		t.Fatal("delete command was not started")

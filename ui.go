@@ -35,6 +35,11 @@ type deletedMsg struct {
 	err     error
 }
 
+type deleteCheckMsg struct {
+	conversation Conversation
+	err          error
+}
+
 type model struct {
 	store SessionStore
 	cwd   string
@@ -55,13 +60,14 @@ type model struct {
 	hasConversation bool
 	viewport        viewport.Model
 
-	loading       bool
-	searching     bool
-	query         string
-	confirmDelete bool
-	err           error
-	width         int
-	height        int
+	loading        bool
+	searching      bool
+	query          string
+	confirmDelete  bool
+	checkingDelete bool
+	err            error
+	width          int
+	height         int
 }
 
 func newModel(store SessionStore, cwd string) model {
@@ -86,6 +92,16 @@ func readConversation(store SessionStore, id string) tea.Cmd {
 	return func() tea.Msg {
 		conversation, err := store.Read(context.Background(), id)
 		return conversationLoadedMsg{conversation: conversation, err: err}
+	}
+}
+
+func checkDelete(store SessionStore, id string) tea.Cmd {
+	return func() tea.Msg {
+		if hasActiveWriter(id) {
+			return deleteCheckMsg{conversation: Conversation{Thread: Thread{ID: id, Active: true}}}
+		}
+		conversation, err := store.Read(context.Background(), id)
+		return deleteCheckMsg{conversation: conversation, err: err}
 	}
 }
 
@@ -150,6 +166,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoTop()
 		}
 		return m, nil
+	case deleteCheckMsg:
+		m.checkingDelete = false
+		m.err = msg.err
+		if msg.err == nil {
+			if msg.conversation.Thread.Active {
+				m.err = sessionInUseError()
+			} else {
+				m.confirmDelete = true
+			}
+		}
+		return m, nil
 	case deletedMsg:
 		m.confirmDelete = false
 		m.loading = false
@@ -182,13 +209,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	if key == "ctrl+c" || (key == "q" && !m.searching && !m.confirmDelete) {
+	if key == "ctrl+c" || (key == "q" && !m.searching && !m.confirmDelete && !m.checkingDelete) {
 		return m, tea.Quit
 	}
 	if m.err != nil {
 		if key == "enter" || key == "esc" {
 			m.err = nil
 		}
+		return m, nil
+	}
+	if m.checkingDelete {
 		return m, nil
 	}
 	if m.confirmDelete {
@@ -286,17 +316,17 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if thread.Active {
-			m.err = fmt.Errorf("this session is currently in use and cannot be deleted")
+			m.err = sessionInUseError()
 		} else {
-			m.confirmDelete = true
-			m.err = nil
+			m.checkingDelete = true
+			return m, checkDelete(m.store, thread.ID)
 		}
 	}
 	return m, nil
 }
 
 func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.confirmDelete || m.err != nil {
+	if m.confirmDelete || m.checkingDelete || m.err != nil {
 		return m, nil
 	}
 	leftWidth, _ := m.paneWidths()
@@ -499,6 +529,9 @@ func (m model) View() string {
 	if m.err != nil {
 		return overlayPopup(base, m.renderErrorPopup(), m.width, m.height)
 	}
+	if m.checkingDelete {
+		return overlayPopup(base, m.renderDeleteChecking(), m.width, m.height)
+	}
 	if m.confirmDelete {
 		return overlayPopup(base, m.renderDeleteConfirmation(), m.width, m.height)
 	}
@@ -554,6 +587,20 @@ func (m model) renderDeleteConfirmation() string {
 		Width(dialogWidth).
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#F25D94")).
+		Padding(1, 2).
+		Render(content)
+	return dialog
+}
+
+func (m model) renderDeleteChecking() string {
+	dialogWidth := min(52, max(1, m.width-8))
+	contentWidth := max(1, dialogWidth-4)
+	content := lipgloss.NewStyle().Bold(true).Render("Checking session…") + "\n\n" +
+		lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render("Please wait")
+	dialog := lipgloss.NewStyle().
+		Width(dialogWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#F59E0B")).
 		Padding(1, 2).
 		Render(content)
 	return dialog
@@ -747,9 +794,13 @@ func (m model) renderStatus() string {
 
 func deleteError(err error) error {
 	if strings.Contains(err.Error(), "active writer") {
-		return fmt.Errorf("this session is currently in use and cannot be deleted")
+		return sessionInUseError()
 	}
 	return err
+}
+
+func sessionInUseError() error {
+	return fmt.Errorf("this session is currently in use and cannot be deleted")
 }
 
 func mutedText(value string) string {
