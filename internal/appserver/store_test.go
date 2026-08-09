@@ -1,4 +1,4 @@
-package main
+package appserver
 
 import (
 	"bufio"
@@ -536,6 +536,86 @@ func TestAppServerStoreReadFallsBackToPaginatedTurns(t *testing.T) {
 	}
 }
 
+func TestAppServerStoreReadOnlyFallsBackForUnsupportedIncludeTurns(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := newRPCClient(clientConn, clientConn)
+	store := &AppServerStore{process: &appServerProcess{client: client}}
+
+	serverDone := make(chan int, 1)
+	go func() {
+		decoder := json.NewDecoder(bufio.NewReader(serverConn))
+		var request map[string]any
+		if decoder.Decode(&request) != nil {
+			serverDone <- 0
+			return
+		}
+		_ = json.NewEncoder(serverConn).Encode(map[string]any{
+			"jsonrpc": "2.0", "id": request["id"],
+			"error": map[string]any{"code": -32602, "message": "thread not found"},
+		})
+		var extra map[string]any
+		if decoder.Decode(&extra) == nil {
+			_ = json.NewEncoder(serverConn).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": extra["id"],
+				"error": map[string]any{"code": -32602, "message": "fallback should not run"},
+			})
+			serverDone <- 2
+			return
+		}
+		serverDone <- 1
+	}()
+
+	_, err := store.Read(context.Background(), "missing")
+	if err == nil || !strings.Contains(err.Error(), "thread not found") {
+		t.Fatalf("error = %v, want original read error", err)
+	}
+	_ = client.close()
+	if got := <-serverDone; got != 1 {
+		t.Fatalf("fallback request count marker = %d, want no fallback", got)
+	}
+}
+
+func TestAppServerStoreReadFallbackPreservesInitialAndFallbackErrors(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := newRPCClient(clientConn, clientConn)
+	store := &AppServerStore{process: &appServerProcess{client: client}}
+	defer client.close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		decoder := json.NewDecoder(bufio.NewReader(serverConn))
+		for number, message := range []string{
+			`{"code":-32602,"message":"includeTurns is not supported"}`,
+			`{"code":-32603,"message":"metadata read failed"}`,
+		} {
+			var request map[string]any
+			if err := decoder.Decode(&request); err != nil {
+				serverDone <- err
+				return
+			}
+			if err := json.NewEncoder(serverConn).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": request["id"], "error": json.RawMessage(message),
+			}); err != nil {
+				serverDone <- err
+				return
+			}
+			if number == 0 && request["method"] != "thread/read" {
+				serverDone <- &testError{"unexpected initial method"}
+				return
+			}
+		}
+		serverDone <- nil
+	}()
+
+	_, err := store.Read(context.Background(), "session")
+	if err == nil || !strings.Contains(err.Error(), "includeTurns is not supported") || !strings.Contains(err.Error(), "metadata read failed") {
+		t.Fatalf("error = %v, want both fallback errors", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAppServerStorePaginatedReadStopsAtTurnLimit(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	client := newRPCClient(clientConn, clientConn)
@@ -559,7 +639,7 @@ func TestAppServerStorePaginatedReadStopsAtTurnLimit(t *testing.T) {
 			switch requestNumber {
 			case 0:
 				response = map[string]any{"jsonrpc": "2.0", "id": request.ID,
-					"error": map[string]any{"code": -32600, "message": "paginated"}}
+					"error": map[string]any{"code": -32600, "message": "includeTurns is not supported"}}
 			case 1:
 				response = map[string]any{"jsonrpc": "2.0", "id": request.ID,
 					"result": map[string]any{"thread": map[string]any{"id": "session", "updatedAt": 10}}}
@@ -676,6 +756,104 @@ func TestAppServerStoreListDescendantsChecksBothArchiveScopes(t *testing.T) {
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAppServerStoreListDescendantsWalksEveryPageInEachArchiveScope(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := newRPCClient(clientConn, clientConn)
+	store := &AppServerStore{process: &appServerProcess{client: client}}
+	defer client.close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		decoder := json.NewDecoder(bufio.NewReader(serverConn))
+		responses := []struct {
+			archived bool
+			cursor   string
+			next     string
+			id       string
+		}{
+			{archived: false, next: "active-next"},
+			{archived: false, cursor: "active-next", id: "active-child"},
+			{archived: true, id: "archived-child"},
+		}
+		for _, expected := range responses {
+			var request struct {
+				ID     int64          `json:"id"`
+				Params map[string]any `json:"params"`
+			}
+			if err := decoder.Decode(&request); err != nil {
+				serverDone <- err
+				return
+			}
+			if request.Params["archived"] != expected.archived {
+				serverDone <- &testError{"unexpected archive scope"}
+				return
+			}
+			if expected.cursor == "" {
+				if _, ok := request.Params["cursor"]; ok {
+					serverDone <- &testError{"unexpected cursor"}
+					return
+				}
+			} else if request.Params["cursor"] != expected.cursor {
+				serverDone <- &testError{"incorrect descendant cursor"}
+				return
+			}
+			items := []map[string]any{}
+			if expected.id != "" {
+				items = append(items, map[string]any{"id": expected.id})
+			}
+			data := map[string]any{"items": items}
+			if expected.next != "" {
+				data["nextCursor"] = expected.next
+			}
+			if err := json.NewEncoder(serverConn).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": request.ID,
+				"result": map[string]any{"data": data},
+			}); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- nil
+	}()
+
+	threads, err := store.ListDescendants(context.Background(), "parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(threads) != 2 || threads[0].ID != "active-child" || threads[1].ID != "archived-child" {
+		t.Fatalf("descendants = %#v", threads)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAppServerStoreListDescendantsRejectsCursorCycle(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	client := newRPCClient(clientConn, clientConn)
+	store := &AppServerStore{process: &appServerProcess{client: client}}
+	defer client.close()
+
+	go func() {
+		decoder := json.NewDecoder(bufio.NewReader(serverConn))
+		for {
+			var request map[string]any
+			if decoder.Decode(&request) != nil {
+				return
+			}
+			_ = json.NewEncoder(serverConn).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": request["id"],
+				"result": map[string]any{"data": map[string]any{"items": []any{}, "nextCursor": "cycle"}},
+			})
+		}
+	}()
+
+	_, err := store.ListDescendants(context.Background(), "parent")
+	if err == nil || !strings.Contains(err.Error(), "cursor cycle") {
+		t.Fatalf("error = %v, want cursor cycle", err)
 	}
 }
 

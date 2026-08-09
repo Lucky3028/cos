@@ -1,15 +1,13 @@
-package main
+package lock
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
-
-func hasActiveWriter(threadID string) (bool, error) {
-	return writerLockStatus(threadID)
-}
 
 func writerLockStatus(threadID string) (bool, error) {
 	lockPath, err := threadWriterLockPath(threadID)
@@ -19,7 +17,15 @@ func writerLockStatus(threadID string) (bool, error) {
 	return lockStatus(lockPath)
 }
 
+// WriterLockStatus reports whether the session's writer lock is currently held.
+func WriterLockStatus(threadID string) (bool, error) {
+	return writerLockStatus(threadID)
+}
+
 func threadWriterLockPath(threadID string) (string, error) {
+	if !validThreadID(threadID) {
+		return "", fmt.Errorf("invalid thread ID %q", threadID)
+	}
 	codexHome := os.Getenv("CODEX_HOME")
 	if codexHome == "" {
 		home, err := os.UserHomeDir()
@@ -31,9 +37,28 @@ func threadWriterLockPath(threadID string) (string, error) {
 	return filepath.Join(codexHome, "thread-writer-locks", threadID+".lock"), nil
 }
 
+func validThreadID(threadID string) bool {
+	if threadID == "" {
+		return false
+	}
+	for _, r := range threadID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || strings.ContainsRune("-_", r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func isLocked(path string) bool {
 	locked, err := lockStatus(path)
 	return err == nil && locked
+}
+
+// IsLocked reports whether the lock at path is held by another process.
+func IsLocked(path string) bool {
+	return isLocked(path)
 }
 
 func lockStatus(path string) (bool, error) {
@@ -57,4 +82,10 @@ func lockStatus(path string) (bool, error) {
 		return true, nil
 	}
 	return false, err
+}
+
+// LockStatus returns the lock state, distinguishing an unavailable path from
+// an I/O error.
+func LockStatus(path string) (bool, error) {
+	return lockStatus(path)
 }

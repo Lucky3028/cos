@@ -1,4 +1,4 @@
-package main
+package appserver
 
 import (
 	"bufio"
@@ -8,9 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"sync"
 	"sync/atomic"
+
+	"github.com/Lucky3028/cos/internal/domain"
 )
 
 var errRPCClosed = errors.New("codex app-server connection closed")
@@ -41,7 +42,7 @@ func (e *rpcError) Error() string {
 	if e == nil {
 		return ""
 	}
-	return fmt.Sprintf("app-server error (%d): %s", e.Code, sanitizeSingleLine(e.Message))
+	return fmt.Sprintf("app-server error (%d): %s", e.Code, domain.SanitizeSingleLine(e.Message))
 }
 
 type rpcResponse struct {
@@ -223,6 +224,10 @@ func (c *rpcClient) request(ctx context.Context, method string, params any, resu
 	case <-c.done:
 		c.abortWrite()
 		writeErr := <-writeDone
+		if response, ok := bufferedRPCResponse(responseCh); ok {
+			c.removePending(id)
+			return c.applyRPCResponse(response, result)
+		}
 		c.removePending(id)
 		c.pendingMu.Lock()
 		err := c.doneErr
@@ -269,6 +274,10 @@ func (c *rpcClient) request(ctx context.Context, method string, params any, resu
 		c.removePending(id)
 		return &rpcRequestTimeout{err: ctx.Err()}
 	case <-c.done:
+		if response, ok := bufferedRPCResponse(responseCh); ok {
+			c.removePending(id)
+			return c.applyRPCResponse(response, result)
+		}
 		c.removePending(id)
 		c.pendingMu.Lock()
 		err := c.doneErr
@@ -281,6 +290,25 @@ func (c *rpcClient) request(ctx context.Context, method string, params any, resu
 		}
 		return err
 	}
+}
+
+func bufferedRPCResponse(responseCh <-chan rpcResponse) (rpcResponse, bool) {
+	select {
+	case response, ok := <-responseCh:
+		return response, ok
+	default:
+		return rpcResponse{}, false
+	}
+}
+
+func (c *rpcClient) applyRPCResponse(response rpcResponse, result any) error {
+	if response.Error != nil {
+		return response.Error
+	}
+	if result == nil || len(response.Result) == 0 || string(response.Result) == "null" {
+		return nil
+	}
+	return json.Unmarshal(response.Result, result)
 }
 
 func (c *rpcClient) notify(method string, params any) error {
@@ -365,64 +393,4 @@ func (c *rpcClient) close() error {
 		return err
 	}
 	return nil
-}
-
-type appServerProcess struct {
-	client *rpcClient
-	cmd    *exec.Cmd
-
-	closeOnce sync.Once
-	closeErr  error
-	waitOnce  sync.Once
-	waitErr   error
-}
-
-func (p *appServerProcess) close() error {
-	if p == nil {
-		return nil
-	}
-	p.closeOnce.Do(func() {
-		clientErr := p.client.close()
-		waitErr := p.wait()
-		if clientErr != nil {
-			p.closeErr = clientErr
-		} else {
-			p.closeErr = waitErr
-		}
-	})
-	return p.closeErr
-}
-
-func (p *appServerProcess) wait() error {
-	if p == nil || p.cmd == nil {
-		return nil
-	}
-	p.waitOnce.Do(func() {
-		p.waitErr = p.cmd.Wait()
-	})
-	return p.waitErr
-}
-
-func startAppServer(_ context.Context, command string, args ...string) (*appServerProcess, error) {
-	// The process belongs to the store, not to the request which happened to
-	// create it. A canceled request closes the client transport when needed;
-	// otherwise the same app-server can serve later requests.
-	cmd := exec.Command(command, args...)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return nil, err
-	}
-	cmd.Stderr = io.Discard
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		return nil, err
-	}
-	client := newRPCClient(stdin, stdout)
-	return &appServerProcess{client: client, cmd: cmd}, nil
 }

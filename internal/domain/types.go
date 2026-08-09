@@ -1,4 +1,4 @@
-package main
+package domain
 
 import (
 	"context"
@@ -17,8 +17,11 @@ const (
 )
 
 const (
-	defaultThreadPageSize = 100
-	maxSearchPages        = 100
+	// DefaultThreadPageSize is the maximum number of sessions requested per
+	// app-server page.
+	DefaultThreadPageSize = 100
+	// MaxSearchPages bounds the number of app-server pages scanned by search.
+	MaxSearchPages = 100
 )
 
 // ThreadListRequest describes one page of a thread/list query. Cursor is the
@@ -67,8 +70,16 @@ type Conversation struct {
 	Truncated bool
 }
 
+type ConversationItemKind string
+
+const (
+	ConversationItemKindUser      ConversationItemKind = "user"
+	ConversationItemKindAssistant ConversationItemKind = "assistant"
+	ConversationItemKindActivity  ConversationItemKind = "activity"
+)
+
 type ConversationItem struct {
-	Kind string // user, assistant, activity
+	Kind ConversationItemKind
 	Text string
 }
 
@@ -76,7 +87,7 @@ type ConversationItem struct {
 // characters from app-server data before it reaches the TUI. Newlines are
 // retained for conversation bodies; callers rendering a single line should
 // pass preserveNewlines=false.
-func sanitizeTerminalText(value string, preserveNewlines bool) string {
+func SanitizeTerminalText(value string, preserveNewlines bool) string {
 	value = ansi.Strip(value)
 	return strings.Map(func(r rune) rune {
 		if preserveNewlines && r == '\n' {
@@ -89,6 +100,6 @@ func sanitizeTerminalText(value string, preserveNewlines bool) string {
 	}, value)
 }
 
-func sanitizeSingleLine(value string) string {
-	return strings.Join(strings.Fields(sanitizeTerminalText(value, false)), " ")
+func SanitizeSingleLine(value string) string {
+	return strings.Join(strings.Fields(SanitizeTerminalText(value, false)), " ")
 }

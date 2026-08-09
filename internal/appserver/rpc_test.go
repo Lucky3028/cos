@@ -1,10 +1,11 @@
-package main
+package appserver
 
 import (
 	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -102,6 +103,62 @@ func TestRPCClientDetectsClosedServer(t *testing.T) {
 	defer client.close()
 	if err := client.request(context.Background(), "ping", nil, nil); !errors.Is(err, errRPCClosed) {
 		t.Fatalf("error = %v, want closed", err)
+	}
+}
+
+type responseAfterWriteInput struct {
+	written chan struct{}
+}
+
+func (w *responseAfterWriteInput) Write(data []byte) (int, error) {
+	select {
+	case <-w.written:
+	default:
+		close(w.written)
+	}
+	return len(data), nil
+}
+
+func (w *responseAfterWriteInput) Close() error { return nil }
+
+type responseAfterWriteOutput struct {
+	written  <-chan struct{}
+	response []byte
+}
+
+func (r *responseAfterWriteOutput) Read(data []byte) (int, error) {
+	<-r.written
+	if len(r.response) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(data, r.response)
+	r.response = r.response[n:]
+	return n, nil
+}
+
+func (r *responseAfterWriteOutput) Close() error { return nil }
+
+func TestRPCClientPrefersBufferedResponseWhenTransportFinishes(t *testing.T) {
+	for attempt := 0; attempt < 50; attempt++ {
+		written := make(chan struct{})
+		client := newRPCClient(
+			&responseAfterWriteInput{written: written},
+			&responseAfterWriteOutput{
+				written:  written,
+				response: []byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":"yes"}}` + "\n"),
+			},
+		)
+		var result struct {
+			OK string `json:"ok"`
+		}
+		err := client.request(context.Background(), "buffered-response", nil, &result)
+		_ = client.close()
+		if err != nil {
+			t.Fatalf("attempt %d: request error = %v", attempt, err)
+		}
+		if result.OK != "yes" {
+			t.Fatalf("attempt %d: result = %#v", attempt, result)
+		}
 	}
 }
 

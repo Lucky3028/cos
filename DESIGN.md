@@ -48,12 +48,28 @@ cos 単独では完全に防げない。
 
 ### ファイル構成
 
-- `main.go`: CLI オプション、cwd の取得、TUI 起動、Codex CLI への引き継ぎ
-- `types.go`: `Thread`、`Conversation`、`SessionStore` などのドメイン型
-- `rpc.go`: JSON-RPC クライアント、app-server プロセス管理
-- `store.go`: app-server API の呼び出しとレスポンス変換
-- `ui.go`: Bubble Tea モデル、一覧・会話表示、キー操作
-- `*_test.go`: JSON-RPC、ページング、会話変換、UI操作のテスト
+- `cmd/cos/main.go`: CLI オプション、cwd の取得、TUI 起動、Codex CLI への引き継ぎ
+- `internal/domain/types.go`: `Thread`、`Conversation`、`SessionStore` などのドメイン型
+- `internal/appserver/rpc.go`: JSON-RPC クライアント
+- `internal/appserver/process.go`: app-server プロセス管理
+- `internal/appserver/store.go`: Store の生成、接続管理、終了処理
+- `internal/appserver/store_list.go`: 一覧、ページング、検索、子孫取得
+- `internal/appserver/store_read.go`: 会話読込と paginated turns fallback
+- `internal/appserver/store_delete.go`: 削除と結果不明時の照合
+- `internal/appserver/store_convert.go`: app-server レスポンスと会話項目の変換
+- `internal/tui/model.go`: Bubble Tea モデルと公開境界
+- `internal/tui/commands.go`: 非同期 Store 操作
+- `internal/tui/update.go`: キー・マウス操作と状態更新
+- `internal/tui/view.go`: 一覧・会話・レイアウト表示
+- `internal/tui/popup.go`: 確認・エラーポップアップ表示
+- `internal/lock/writer_lock.go`: writer lock の状態確認
+- 各ディレクトリの `*_test.go`: RPC、Store、UI、lock、CLI の責務別テスト
+
+パッケージ間の境界は次のとおりとする。`internal/domain` は共有するドメイン型と
+`SessionStore` を定義し、`internal/appserver` は `SessionStore` の実装として
+`NewDefaultStore`、`NewAppServerStore`、`AppServerStore.Close` を提供する。
+`internal/tui` は `NewModel(domain.SessionStore, cwd)` と
+`Model.ResumeSession()` を提供し、CLI は再開対象の session だけを受け取る。
 
 ## 4. app-server 通信
 

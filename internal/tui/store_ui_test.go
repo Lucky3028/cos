@@ -1,8 +1,7 @@
-package main
+package tui
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,66 +14,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
-
-func TestConversationItemsHideReasoningAndSummarizeActivities(t *testing.T) {
-	turn := apiTurn{Items: []json.RawMessage{
-		json.RawMessage(`{"type":"userMessage","content":[{"type":"text","text":"hello"}]}`),
-		json.RawMessage(`{"type":"reasoning","content":["secret"]}`),
-		json.RawMessage(`{"type":"agentMessage","text":"world"}`),
-		json.RawMessage(`{"type":"commandExecution","command":"go test ./...","status":"completed"}`),
-		json.RawMessage(`{"type":"fileChange","changes":[{"path":"main.go","kind":"edit","diff":"huge"}]}`),
-		json.RawMessage(`{"type":"mcpToolCall","server":"docs","tool":"search","arguments":{}}`),
-	}}
-	items := conversationItems([]apiTurn{turn})
-	if len(items) != 5 {
-		t.Fatalf("item count = %d, want 5", len(items))
-	}
-	if items[0].Kind != "user" || items[0].Text != "hello" {
-		t.Fatalf("user = %#v", items[0])
-	}
-	if strings.Contains(items[1].Text, "secret") || items[1].Text != "world" {
-		t.Fatalf("reasoning leaked or assistant missing: %#v", items[1])
-	}
-	if !strings.Contains(items[2].Text, "go test ./...") || !strings.Contains(items[3].Text, "main.go") || !strings.Contains(items[4].Text, "docs/search") {
-		t.Fatalf("activities = %#v", items[2:])
-	}
-}
-
-func TestAppServerTextIsSanitizedWithoutDroppingConversationNewlines(t *testing.T) {
-	unsafe := "\x1b[31mred\x1b[0m\x1b]0;title\a\x07\b\r\nnext\u0080"
-	name := unsafe
-	thread := apiThread{Name: &name, Preview: unsafe, CWD: unsafe}.toThread()
-	if strings.ContainsAny(thread.Title+thread.Preview+thread.CWD, "\x1b\x07\b\r\u0080") {
-		t.Fatalf("thread fields retained control characters: %#v", thread)
-	}
-	if strings.Contains(thread.Title, "red") == false || strings.Contains(thread.Title, "next") == false {
-		t.Fatalf("sanitized title lost content: %q", thread.Title)
-	}
-
-	item := conversationItem(json.RawMessage("{\"type\":\"agentMessage\",\"text\":\"first\\u001b[2J\\nsecond\\r\\b\\u0007\"}"))
-	if item.Text != "first\nsecond" {
-		t.Fatalf("sanitized conversation = %q", item.Text)
-	}
-	activity := conversationItem(json.RawMessage("{\"type\":\"mcpToolCall\",\"server\":\"srv\\u001b[31m\",\"tool\":\"tool\\u0007\"}"))
-	if strings.ContainsAny(activity.Text, "\x1b\a") {
-		t.Fatalf("sanitized activity retained control characters: %q", activity.Text)
-	}
-	if strings.ContainsAny((&rpcError{Code: 1, Message: unsafe}).Error(), "\x1b\a\b\r\u0080") {
-		t.Fatal("sanitized error retained control characters")
-	}
-}
-
-func TestThreadTitleUsesNameAndPreviewFallback(t *testing.T) {
-	name := "Named session"
-	withName := apiThread{Name: &name, Preview: "first message"}.toThread()
-	if displayTitle(withName) != "Named session" {
-		t.Fatalf("title = %q", displayTitle(withName))
-	}
-	withoutName := apiThread{Preview: "first message"}.toThread()
-	if displayTitle(withoutName) != "first message" {
-		t.Fatalf("preview fallback = %q", displayTitle(withoutName))
-	}
-}
 
 func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 	m := newModel(nil, "/background-preview")
@@ -94,6 +33,17 @@ func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 	}
 }
 
+func TestThreadTitleUsesNameAndPreviewFallback(t *testing.T) {
+	withName := Thread{Title: "Named session", Preview: "first message"}
+	if displayTitle(withName) != "Named session" {
+		t.Fatalf("title = %q", displayTitle(withName))
+	}
+	withoutName := Thread{Preview: "first message"}
+	if displayTitle(withoutName) != "first message" {
+		t.Fatalf("preview fallback = %q", displayTitle(withoutName))
+	}
+}
+
 func TestHeaderSanitizesLaunchCWDOnlyForDisplay(t *testing.T) {
 	m := newModel(nil, "/work/\x1b]0;unsafe\a\nproject")
 	m.width, m.height, m.loading = 80, 12, false
@@ -104,6 +54,29 @@ func TestHeaderSanitizesLaunchCWDOnlyForDisplay(t *testing.T) {
 	}
 	if !strings.Contains(header, "/work/") || !strings.Contains(header, "project") {
 		t.Fatalf("sanitized cwd lost display content: %q", header)
+	}
+}
+
+func TestTruncateUsesTerminalDisplayWidth(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		value string
+		width int
+		want  string
+	}{
+		{name: "japanese", value: "日本語", width: 5, want: "日本…"},
+		{name: "emoji", value: "🙂🙂🙂", width: 5, want: "🙂🙂…"},
+		{name: "combining", value: "e\u0301abc", width: 3, want: "e\u0301a…"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := truncate(test.value, test.width)
+			if got != test.want {
+				t.Fatalf("truncate(%q, %d) = %q, want %q", test.value, test.width, got, test.want)
+			}
+			if ansi.StringWidth(got) > test.width {
+				t.Fatalf("truncated display width = %d, want <= %d", ansi.StringWidth(got), test.width)
+			}
+		})
 	}
 }
 
@@ -274,6 +247,56 @@ func TestWriterLockPreventsResume(t *testing.T) {
 	m = updated.(model)
 	if quit != nil || m.resumeRequested || m.err == nil {
 		t.Fatalf("locked resume state = requested:%v err:%v quit:%v", m.resumeRequested, m.err, quit != nil)
+	}
+}
+
+func TestValidateIdleSessionRejectsWriterLock(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	lockDir := filepath.Join(codexHome, "thread-writer-locks")
+	if err := os.MkdirAll(lockDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Create(filepath.Join(lockDir, "session.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = validateIdleSession(context.Background(), &fakeStore{}, "session", false)
+	if err == nil || !strings.Contains(err.Error(), "currently in use") {
+		t.Fatalf("writer lock validation error = %v", err)
+	}
+}
+
+func TestValidateIdleSessionRejectsActiveRead(t *testing.T) {
+	store := &fakeStore{readConversation: Conversation{Thread: Thread{ID: "session", Active: true}}}
+	_, err := validateIdleSession(context.Background(), store, "session", false)
+	if err == nil || !strings.Contains(err.Error(), "currently in use") {
+		t.Fatalf("active validation error = %v", err)
+	}
+}
+
+func TestValidateIdleSessionPreservesReadFailure(t *testing.T) {
+	want := errors.New("read failed")
+	store := &fakeStore{readErr: want}
+	_, err := validateIdleSession(context.Background(), store, "session", false)
+	if !errors.Is(err, want) {
+		t.Fatalf("read validation error = %v, want %v", err, want)
+	}
+}
+
+func TestValidateIdleSessionRejectsDescendantsWhenRequested(t *testing.T) {
+	store := &fakeStore{
+		descendants:      []Thread{{ID: "child"}},
+		readConversation: Conversation{Thread: Thread{ID: "session"}},
+	}
+	_, err := validateIdleSession(context.Background(), store, "session", true)
+	if err == nil || !strings.Contains(err.Error(), "descendant") {
+		t.Fatalf("descendant validation error = %v", err)
 	}
 }
 
