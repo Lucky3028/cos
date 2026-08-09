@@ -8,13 +8,21 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func (m *model) nextRequest(id string) requestMeta {
+func (m *model) newRequestMeta(threadID string) requestMeta {
 	m.requestGeneration++
-	return requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd, cursor: m.pendingCursor, query: m.query, searchPages: m.pendingSearchPages, id: id}
+	return requestMeta{
+		generation:  m.requestGeneration,
+		scope:       m.scope,
+		cwd:         m.cwd,
+		cursor:      m.pendingCursor,
+		query:       m.query,
+		searchPages: m.pendingSearchPages,
+		threadID:    threadID,
+	}
 }
 
-func (m *model) beginConversation(id string) tea.Cmd {
-	meta := m.nextRequest(id)
+func (m *model) beginConversationLoad(threadID string) tea.Cmd {
+	meta := m.newRequestMeta(threadID)
 	ctx, cancel := m.beginAsyncRequest()
 	m.hasConversation = false
 	return readConversationWithContext(m.store, ctx, cancel, meta)
@@ -29,30 +37,30 @@ func (m *model) beginListLoad() tea.Cmd {
 	m.pendingSearchPages = 0
 	m.pageSearchStart = 0
 	m.searchPages = 0
-	m.selectPageEnd = false
+	m.selectLastOnPage = false
 	m.searchIncomplete = false
-	meta := m.nextRequest("")
+	meta := m.newRequestMeta("")
 	ctx, cancel := m.beginAsyncRequest()
 	m.loading = true
 	m.err = nil
 	return loadThreadsWithContext(m.store, ctx, cancel, meta)
 }
 
-func (m *model) beginPageLoad(cursor string, selectEnd bool) tea.Cmd {
-	return m.beginPageLoadWithSearchPages(cursor, selectEnd, m.searchPages)
+func (m *model) beginPageLoad(cursor string, selectLast bool) tea.Cmd {
+	return m.beginPageLoadWithSearchPages(cursor, selectLast, m.searchPages)
 }
 
-func (m *model) beginPageLoadWithSearchPages(cursor string, selectEnd bool, searchPages int) tea.Cmd {
+func (m *model) beginPageLoadWithSearchPages(cursor string, selectLast bool, searchPages int) tea.Cmd {
 	m.pendingCursor = cursor
 	m.pendingSearchPages = searchPages
-	m.selectPageEnd = selectEnd
-	meta := m.nextRequest("")
+	m.selectLastOnPage = selectLast
+	meta := m.newRequestMeta("")
 	ctx, cancel := m.beginAsyncRequest()
 	m.loading = true
 	m.err = nil
 	m.hasConversation = false
 	m.threads = nil
-	m.filtered = nil
+	m.visibleThreads = nil
 	return loadThreadsWithContext(m.store, ctx, cancel, meta)
 }
 
@@ -70,30 +78,30 @@ func (m *model) beginAsyncRequest() (context.Context, context.CancelFunc) {
 
 func (m *model) clearListState() {
 	m.threads = nil
-	m.filtered = nil
+	m.visibleThreads = nil
 	m.listOffset = 0
 	m.hasConversation = false
 	m.conversation = Conversation{}
 	m.viewport.SetContent("")
 }
 
-func (m model) matchesRequest(meta requestMeta, requireID bool) bool {
+func (m model) matchesRequest(meta requestMeta, requireThread bool) bool {
 	// Zero metadata is retained for small, synchronous unit-test messages and
 	// for callers of the legacy command helpers. Every real UI command carries
 	// a non-zero generation.
 	if meta.generation == 0 {
-		if requireID && meta.id != "" {
+		if requireThread && meta.threadID != "" {
 			selected, ok := m.selectedThread()
-			return ok && selected.ID == meta.id
+			return ok && selected.ID == meta.threadID
 		}
 		return true
 	}
 	if meta.generation != m.requestGeneration || meta.scope != m.scope || meta.cwd != m.cwd || meta.query != m.query {
 		return false
 	}
-	if requireID {
+	if requireThread {
 		selected, ok := m.selectedThread()
-		return ok && selected.ID == meta.id
+		return ok && selected.ID == meta.threadID
 	}
 	return true
 }
@@ -134,7 +142,7 @@ func withManagedRequest(ctx context.Context, cancel context.CancelFunc, fn func(
 }
 
 func readConversationMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
-	conversation, err := store.Read(ctx, meta.id)
+	conversation, err := store.Read(ctx, meta.threadID)
 	return conversationLoadedMsg{conversation: conversation, err: err, requestMeta: meta}
 }
 
@@ -145,15 +153,15 @@ func threadListRequest(meta requestMeta) ThreadListRequest {
 	}
 }
 
-func validateIdleSession(ctx context.Context, store SessionStore, id string, checkDescendants bool) (Conversation, error) {
-	locked, err := writerLockStatus(id)
+func validateIdleSession(ctx context.Context, store SessionStore, sessionID string, checkDescendants bool) (Conversation, error) {
+	locked, err := writerLockStatus(sessionID)
 	if err != nil {
-		return Conversation{}, fmt.Errorf("check writer lock for session %s: %w", id, err)
+		return Conversation{}, fmt.Errorf("check writer lock for session %s: %w", sessionID, err)
 	}
 	if locked {
-		return Conversation{Thread: Thread{ID: id, Active: true}}, sessionInUseError()
+		return Conversation{Thread: Thread{ID: sessionID, Active: true}}, sessionInUseError()
 	}
-	conversation, err := store.Read(ctx, id)
+	conversation, err := store.Read(ctx, sessionID)
 	if err != nil {
 		return Conversation{}, err
 	}
@@ -163,18 +171,18 @@ func validateIdleSession(ctx context.Context, store SessionStore, id string, che
 	if !checkDescendants {
 		return conversation, nil
 	}
-	descendants, err := store.ListDescendants(ctx, id)
+	descendants, err := store.ListDescendants(ctx, sessionID)
 	if err != nil {
-		return Conversation{}, fmt.Errorf("cannot verify descendants of session %s: %w", id, err)
+		return Conversation{}, fmt.Errorf("cannot verify descendants of session %s: %w", sessionID, err)
 	}
 	if len(descendants) > 0 {
-		return Conversation{}, descendantSessionError(id, descendants)
+		return Conversation{}, descendantSessionError(sessionID, descendants)
 	}
 	return conversation, nil
 }
 
 func checkDeleteMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
-	conversation, err := validateIdleSession(ctx, store, meta.id, true)
+	conversation, err := validateIdleSession(ctx, store, meta.threadID, true)
 	if err != nil {
 		return deleteCheckMsg{err: err, requestMeta: meta}
 	}
@@ -182,33 +190,33 @@ func checkDeleteMessage(ctx context.Context, store SessionStore, meta requestMet
 }
 
 func checkResumeMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
-	conversation, err := validateIdleSession(ctx, store, meta.id, false)
+	conversation, err := validateIdleSession(ctx, store, meta.threadID, false)
 	return resumeCheckMsg{conversation: conversation, err: err, requestMeta: meta}
 }
 
 func deleteThreadMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
-	if _, err := validateIdleSession(ctx, store, meta.id, true); err != nil {
+	if _, err := validateIdleSession(ctx, store, meta.threadID, true); err != nil {
 		return deletedMsg{err: err, requestMeta: meta}
 	}
-	deleteErr := store.Delete(ctx, meta.id)
+	deleteErr := store.Delete(ctx, meta.threadID)
 	page, listErr := store.List(ctx, threadListRequest(meta))
 	if listErr != nil {
 		if deleteErr != nil {
 			return deletedMsg{err: fmt.Errorf("delete failed (%v); reload failed: %w", deleteError(deleteErr), listErr), requestMeta: meta}
 		}
-		return deletedMsg{err: fmt.Errorf("deleted session %s, but reload failed: %w", meta.id, listErr), requestMeta: meta}
+		return deletedMsg{err: fmt.Errorf("deleted session %s, but reload failed: %w", meta.threadID, listErr), requestMeta: meta}
 	}
 	if deleteErr != nil {
 		return deletedMsg{page: page, err: deleteError(deleteErr), requestMeta: meta}
 	}
 	for _, thread := range page.Threads {
-		if thread.ID == meta.id {
-			return deletedMsg{page: page, err: fmt.Errorf("session %s is still present after deletion", meta.id), requestMeta: meta}
+		if thread.ID == meta.threadID {
+			return deletedMsg{page: page, err: fmt.Errorf("session %s is still present after deletion", meta.threadID), requestMeta: meta}
 		}
 	}
 	return deletedMsg{page: page, requestMeta: meta}
 }
 
-func descendantSessionError(id string, descendants []Thread) error {
-	return fmt.Errorf("session %s has %d descendant session(s); delete is unavailable", id, len(descendants))
+func descendantSessionError(sessionID string, descendants []Thread) error {
+	return fmt.Errorf("session %s has %d descendant session(s); delete is unavailable", sessionID, len(descendants))
 }

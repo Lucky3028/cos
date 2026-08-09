@@ -23,13 +23,13 @@ func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 	}
 	m.query = "release"
 	m.applyFilter()
-	if len(m.filtered) != 1 || m.filtered[0].ID != "1" {
-		t.Fatalf("preview filter = %#v", m.filtered)
+	if len(m.visibleThreads) != 1 || m.visibleThreads[0].ID != "1" {
+		t.Fatalf("preview filter = %#v", m.visibleThreads)
 	}
 	m.query = "/work/project"
 	m.applyFilter()
-	if len(m.filtered) != 2 {
-		t.Fatalf("cwd search = %#v", m.filtered)
+	if len(m.visibleThreads) != 2 {
+		t.Fatalf("cwd search = %#v", m.visibleThreads)
 	}
 }
 
@@ -444,13 +444,13 @@ func TestStaleListAndConversationResponsesAreDiscarded(t *testing.T) {
 		t.Fatalf("stale list changed model: loading=%v threads=%#v cmd=%v", m.loading, m.threads, cmd != nil)
 	}
 
-	m.filtered = []Thread{{ID: "new"}}
-	m.selected = 0
+	m.visibleThreads = []Thread{{ID: "new"}}
+	m.selectedIndex = 0
 	m.hasConversation = true
 	m.conversation = Conversation{Thread: Thread{ID: "new"}}
 	stale := conversationLoadedMsg{
 		conversation: Conversation{Thread: Thread{ID: "new", Title: "old conversation"}},
-		requestMeta:  requestMeta{generation: 4, scope: CurrentDirectory, cwd: "/work", id: "new"},
+		requestMeta:  requestMeta{generation: 4, scope: CurrentDirectory, cwd: "/work", threadID: "new"},
 	}
 	updated, cmd = m.Update(stale)
 	m = updated.(model)
@@ -484,8 +484,8 @@ func TestSelectionMovesAcrossPagesWithoutWrapping(t *testing.T) {
 	}
 	updated, _ = m.Update(pageMessage)
 	m = updated.(model)
-	if m.selectedID() != "second" || m.nextCursor != "" {
-		t.Fatalf("second page state = selected:%q next:%q", m.selectedID(), m.nextCursor)
+	if m.selectedThreadID() != "second" || m.nextCursor != "" {
+		t.Fatalf("second page state = selected:%q next:%q", m.selectedThreadID(), m.nextCursor)
 	}
 
 	updated, cmd = m.Update(keyMsg("k"))
@@ -499,8 +499,8 @@ func TestSelectionMovesAcrossPagesWithoutWrapping(t *testing.T) {
 	}
 	updated, _ = m.Update(pageMessage)
 	m = updated.(model)
-	if m.selectedID() != "first" {
-		t.Fatalf("previous page selection = %q", m.selectedID())
+	if m.selectedThreadID() != "first" {
+		t.Fatalf("previous page selection = %q", m.selectedThreadID())
 	}
 	updated, cmd = m.Update(keyMsg("j"))
 	m = updated.(model)
@@ -515,7 +515,7 @@ func TestSelectionChangeCancelsPreviousConversationRequest(t *testing.T) {
 	m.loading = false
 	m.threads = []Thread{{ID: "a"}, {ID: "b"}}
 	m.applyFilter()
-	first := m.beginConversation("a")
+	first := m.beginConversationLoad("a")
 	go first()
 	select {
 	case id := <-store.readStarted:
@@ -527,8 +527,8 @@ func TestSelectionChangeCancelsPreviousConversationRequest(t *testing.T) {
 	}
 	updated, second := m.Update(keyMsg("j"))
 	m = updated.(model)
-	if second == nil || m.selectedID() != "b" {
-		t.Fatalf("selection change = selected:%q command:%v", m.selectedID(), second != nil)
+	if second == nil || m.selectedThreadID() != "b" {
+		t.Fatalf("selection change = selected:%q command:%v", m.selectedThreadID(), second != nil)
 	}
 	select {
 	case id := <-store.readCanceled:
@@ -577,8 +577,8 @@ func TestSearchReloadsConversationForNewSelection(t *testing.T) {
 	m = updated.(model)
 	updated, cmd := m.Update(keyMsg("b"))
 	m = updated.(model)
-	if cmd == nil || m.selectedID() != "b" {
-		t.Fatalf("search did not select b: selected=%s cmd=%v", m.selectedID(), cmd != nil)
+	if cmd == nil || m.selectedThreadID() != "b" {
+		t.Fatalf("search did not select b: selected=%s cmd=%v", m.selectedThreadID(), cmd != nil)
 	}
 	conversation := cmd().(conversationLoadedMsg)
 	if conversation.conversation.Thread.ID != "b" {
@@ -596,8 +596,8 @@ func TestSearchBackspaceRemovesOneUnicodeRune(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m = updated.(model)
-	if m.query != "日" || len(m.filtered) != 1 || m.filtered[0].ID != "session" {
-		t.Fatalf("unicode backspace state = query:%q filtered:%#v", m.query, m.filtered)
+	if m.query != "日" || len(m.visibleThreads) != 1 || m.visibleThreads[0].ID != "session" {
+		t.Fatalf("unicode backspace state = query:%q filtered:%#v", m.query, m.visibleThreads)
 	}
 }
 
@@ -609,8 +609,8 @@ func TestHiddenPreviewUsesFullWidthForMouseSelection(t *testing.T) {
 	m.applyFilter()
 	updated, _ := m.Update(tea.MouseMsg{X: 70, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(model)
-	if m.pane != listPane || m.selected != 1 {
-		t.Fatalf("full-width click did not select list item: pane=%v selected=%d", m.pane, m.selected)
+	if m.pane != listPane || m.selectedIndex != 1 {
+		t.Fatalf("full-width click did not select list item: pane=%v selected=%d", m.pane, m.selectedIndex)
 	}
 }
 
@@ -708,26 +708,26 @@ func TestScopeSwitchRestoresIndependentSelection(t *testing.T) {
 	m.loading = false
 	m.threads = makeTestThreads(10)
 	m.applyFilter()
-	m.selected = 6 // seventh item in the cwd-scoped list
+	m.selectedIndex = 6 // seventh item in the cwd-scoped list
 	m.selectedByScope[scopeIndex(CurrentDirectory)] = 6
 
 	updated, _ := m.Update(keyMsg("a"))
 	m = updated.(model)
-	if m.scope != AllThreads || m.selected != 6 {
-		t.Fatalf("all scope selection = %d", m.selected)
+	if m.scope != AllThreads || m.selectedIndex != 6 {
+		t.Fatalf("all scope selection = %d", m.selectedIndex)
 	}
 	updated, _ = m.Update(threadsLoadedMsg{threads: makeTestThreads(3)})
 	m = updated.(model)
 
 	updated, _ = m.Update(keyMsg("a"))
 	m = updated.(model)
-	if m.scope != CurrentDirectory || m.selected != 6 {
-		t.Fatalf("restored cwd selection = %d, want 6", m.selected)
+	if m.scope != CurrentDirectory || m.selectedIndex != 6 {
+		t.Fatalf("restored cwd selection = %d, want 6", m.selectedIndex)
 	}
 	updated, _ = m.Update(threadsLoadedMsg{threads: makeTestThreads(10)})
 	m = updated.(model)
-	if m.selected != 6 {
-		t.Fatalf("loaded cwd selection = %d, want 6", m.selected)
+	if m.selectedIndex != 6 {
+		t.Fatalf("loaded cwd selection = %d, want 6", m.selectedIndex)
 	}
 }
 
@@ -741,8 +741,8 @@ func TestScopeSwitchErrorClearsPreviousScopeState(t *testing.T) {
 
 	updated, _ := m.Update(keyMsg("a"))
 	m = updated.(model)
-	if m.scope != AllThreads || len(m.threads) != 0 || len(m.filtered) != 0 || m.hasConversation {
-		t.Fatalf("scope switch retained old state: scope=%v threads=%#v filtered=%#v conversation=%v", m.scope, m.threads, m.filtered, m.hasConversation)
+	if m.scope != AllThreads || len(m.threads) != 0 || len(m.visibleThreads) != 0 || m.hasConversation {
+		t.Fatalf("scope switch retained old state: scope=%v threads=%#v filtered=%#v conversation=%v", m.scope, m.threads, m.visibleThreads, m.hasConversation)
 	}
 
 	updated, _ = m.Update(threadsLoadedMsg{
@@ -750,8 +750,8 @@ func TestScopeSwitchErrorClearsPreviousScopeState(t *testing.T) {
 		requestMeta: requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd},
 	})
 	m = updated.(model)
-	if m.err == nil || len(m.threads) != 0 || len(m.filtered) != 0 || m.hasConversation {
-		t.Fatalf("scope error exposed stale state: err=%v threads=%#v filtered=%#v conversation=%v", m.err, m.threads, m.filtered, m.hasConversation)
+	if m.err == nil || len(m.threads) != 0 || len(m.visibleThreads) != 0 || m.hasConversation {
+		t.Fatalf("scope error exposed stale state: err=%v threads=%#v filtered=%#v conversation=%v", m.err, m.threads, m.visibleThreads, m.hasConversation)
 	}
 }
 
@@ -764,14 +764,14 @@ func TestMouseClickSelectsThreadAndWheelScrollsConversation(t *testing.T) {
 
 	updated, _ := m.Update(tea.MouseMsg{X: 2, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = updated.(model)
-	if m.selected != 1 || m.pane != listPane {
-		t.Fatalf("mouse selected = %d, pane = %v", m.selected, m.pane)
+	if m.selectedIndex != 1 || m.pane != listPane {
+		t.Fatalf("mouse selected = %d, pane = %v", m.selectedIndex, m.pane)
 	}
 	m.pane = conversationPane
 	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 5, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
 	m = updated.(model)
-	if m.pane != listPane || m.selected != 2 {
-		t.Fatalf("left wheel did not select list pane: pane=%v selected=%d", m.pane, m.selected)
+	if m.pane != listPane || m.selectedIndex != 2 {
+		t.Fatalf("left wheel did not select list pane: pane=%v selected=%d", m.pane, m.selectedIndex)
 	}
 	m.pane = conversationPane
 	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 19, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
@@ -795,13 +795,13 @@ func TestMouseClickOutsideVisibleListDoesNotSelectHiddenThread(t *testing.T) {
 	m.width, m.height, m.loading = 80, 12, false
 	m.threads = makeTestThreads(20)
 	m.applyFilter()
-	m.selected = 0
+	m.selectedIndex = 0
 
 	for _, y := range []int{m.height - 2, m.height - 1} {
 		updated, _ := m.Update(tea.MouseMsg{X: 2, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 		m = updated.(model)
-		if m.selected != 0 {
-			t.Fatalf("click at y=%d selected hidden thread %d", y, m.selected)
+		if m.selectedIndex != 0 {
+			t.Fatalf("click at y=%d selected hidden thread %d", y, m.selectedIndex)
 		}
 	}
 }
@@ -903,7 +903,7 @@ func TestResizeKeepsSelectedListItemVisible(t *testing.T) {
 		m.threads[i].Title = "thread-" + string(rune('A'+i))
 	}
 	m.applyFilter()
-	m.selected = 8
+	m.selectedIndex = 8
 	m.resizeViewport()
 	m.height = 12
 	m.resizeViewport()

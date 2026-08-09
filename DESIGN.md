@@ -50,7 +50,9 @@ cos 単独では完全に防げない。
 
 - `cmd/cos/main.go`: CLI オプション、cwd の取得、TUI 起動、Codex CLI への引き継ぎ
 - `internal/domain/types.go`: `Thread`、`Conversation`、`SessionStore` などのドメイン型
-- `internal/appserver/rpc.go`: JSON-RPC クライアント
+- `internal/appserver/rpc.go`: JSON-RPC クライアントの状態、接続終了処理、エラー型
+- `internal/appserver/rpc_reader.go`: JSONL reader、通知の除外、応答の振り分け
+- `internal/appserver/rpc_request.go`: request の pending 管理、書き込み、timeout、応答待ち
 - `internal/appserver/process.go`: app-server プロセス管理
 - `internal/appserver/store.go`: Store の生成、接続管理、終了処理
 - `internal/appserver/store_list.go`: 一覧、ページング、検索、子孫取得
@@ -59,7 +61,11 @@ cos 単独では完全に防げない。
 - `internal/appserver/store_convert.go`: app-server レスポンスと会話項目の変換
 - `internal/tui/model.go`: Bubble Tea モデルと公開境界
 - `internal/tui/commands.go`: 非同期 Store 操作
-- `internal/tui/update.go`: キー・マウス操作と状態更新
+- `internal/tui/update.go`: Bubble Tea のメッセージ振り分けと表示レイアウト状態
+- `internal/tui/update_messages.go`: 非同期 Store 応答の状態反映
+- `internal/tui/update_keys.go`: キー操作、検索、scope 切り替え、確認操作
+- `internal/tui/update_mouse.go`: マウス操作とホイール操作
+- `internal/tui/update_selection.go`: session 選択、ページ移動、検索結果の絞り込み
 - `internal/tui/view.go`: 一覧・会話・レイアウト表示
 - `internal/tui/popup.go`: 確認・エラーポップアップ表示
 - `internal/lock/writer_lock.go`: writer lock の状態確認

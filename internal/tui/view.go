@@ -72,13 +72,13 @@ func (m model) renderList(width int) string {
 	var b strings.Builder
 	if m.loading {
 		b.WriteString("Loading…")
-	} else if len(m.filtered) == 0 {
+	} else if len(m.visibleThreads) == 0 {
 		b.WriteString("No sessions")
 	} else {
-		for i := m.listOffset; i < len(m.filtered); i++ {
-			thread := m.filtered[i]
+		for i := m.listOffset; i < len(m.visibleThreads); i++ {
+			thread := m.visibleThreads[i]
 			marker := "  "
-			if i == m.selected {
+			if i == m.selectedIndex {
 				marker = "▸ "
 			}
 			name := displayTitle(thread)
@@ -87,7 +87,7 @@ func (m model) renderList(width int) string {
 			}
 			row := marker + truncate(sanitizeSingleLine(name), max(1, contentWidth-lipgloss.Width(marker)))
 			row = fitLine(row, contentWidth)
-			if i == m.selected {
+			if i == m.selectedIndex {
 				row = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B")).Background(lipgloss.Color("#4B5563")).Render(row)
 			}
 			b.WriteString(row + "\n")
@@ -97,7 +97,7 @@ func (m model) renderList(width int) string {
 				preview := "   " + mutedText(sanitizeSingleLine(thread.Preview))
 				b.WriteString(fitLine(preview, contentWidth) + "\n")
 			}
-			if i < len(m.filtered)-1 {
+			if i < len(m.visibleThreads)-1 {
 				// Leave a small visual gap between sessions.
 				b.WriteString("\n")
 			}
@@ -118,7 +118,7 @@ func (m model) renderConversation(width int) string {
 		return style.Render("Loading…")
 	}
 	if !m.hasConversation {
-		if len(m.filtered) == 0 {
+		if len(m.visibleThreads) == 0 {
 			return style.Render("Select a session to inspect its conversation.")
 		}
 		return style.Render("Reading conversation…")

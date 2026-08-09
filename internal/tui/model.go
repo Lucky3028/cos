@@ -21,7 +21,7 @@ type requestMeta struct {
 	cursor      string
 	query       string
 	searchPages int
-	id          string
+	threadID    string
 }
 
 type threadsLoadedMsg struct {
@@ -62,8 +62,8 @@ type Model struct {
 	scope ListScope
 
 	threads                 []Thread
-	filtered                []Thread
-	selected                int
+	visibleThreads          []Thread
+	selectedIndex           int
 	listOffset              int
 	showConversationPreview bool
 	// Keep a cursor per scope so a short result set cannot overwrite the
@@ -78,7 +78,7 @@ type Model struct {
 	pendingSearchPages  int
 	pageSearchStart     int
 	searchPages         int
-	selectPageEnd       bool
+	selectLastOnPage    bool
 	searchIncomplete    bool
 	pane                pane
 
