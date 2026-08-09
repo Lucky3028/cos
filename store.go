@@ -54,7 +54,7 @@ func (s *AppServerStore) client(ctx context.Context) (*rpcClient, error) {
 	}
 	if err := process.client.request(ctx, "initialize", map[string]any{
 		"clientInfo": map[string]string{
-			"name": "cos", "title": "Codex Session Organizer", "version": version,
+			"name": "cos", "title": "cos", "version": version,
 		},
 		"capabilities": map[string]any{"experimentalApi": true},
 	}, nil); err != nil {

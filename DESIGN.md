@@ -2,7 +2,7 @@
 
 ## 1. 目的
 
-`cos`（Codex Session Organizer）は、Codex のセッションを TUI で一覧・閲覧・削除する Linux 向けツールである。
+`cos` は、Codex のセッションを TUI で一覧・閲覧・削除する Linux 向けツールである。
 
 画面表示と本設計書での呼称は `session`（セッション）に統一する。Codex app-server の API 名（`thread/list` など）と、それに対応する内部型 `Thread` は外部仕様との対応を保つため変更しない。
 

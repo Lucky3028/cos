@@ -507,8 +507,8 @@ func (m model) renderBaseView() string {
 	leftWidth, rightWidth := m.paneWidths()
 	accent := lipgloss.Color("#F59E0B")
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
-	title := lipgloss.NewStyle().Bold(true).Foreground(accent).Render("cos") + muted.Render("  Codex Session Organizer")
-	scope := "cwd: " + m.cwd
+	title := lipgloss.NewStyle().Bold(true).Foreground(accent).Render("cos")
+	scope := "sessions in current working directory: " + m.cwd
 	if m.scope == AllThreads {
 		scope = "all sessions"
 	}

@@ -14,7 +14,7 @@ const version = "0.1.0"
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: cos [options]\n\nCodex Session Organizer — browse and delete Codex sessions.\n\nOptions:\n")
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: cos [options]\n\nBrowse and delete Codex sessions.\n\nOptions:\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
