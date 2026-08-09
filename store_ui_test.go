@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -66,8 +67,9 @@ func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 }
 
 type fakeStore struct {
-	threads []Thread
-	deleted []string
+	threads   []Thread
+	deleted   []string
+	deleteErr error
 }
 
 func (f *fakeStore) List(context.Context, ListScope, string) ([]Thread, error) {
@@ -76,7 +78,7 @@ func (f *fakeStore) List(context.Context, ListScope, string) ([]Thread, error) {
 func (f *fakeStore) Read(context.Context, string) (Conversation, error) { return Conversation{}, nil }
 func (f *fakeStore) Delete(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
-	return nil
+	return f.deleteErr
 }
 
 func TestActiveThreadCannotBeDeleted(t *testing.T) {
@@ -89,8 +91,46 @@ func TestActiveThreadCannotBeDeleted(t *testing.T) {
 	if result.confirmDelete {
 		t.Fatal("active thread opened delete confirmation")
 	}
-	if result.err == nil || !strings.Contains(result.err.Error(), "active") {
+	if result.err == nil || !strings.Contains(result.err.Error(), "currently in use") {
 		t.Fatalf("error = %v", result.err)
+	}
+}
+
+func TestDeleteErrorIsRenderedAsModal(t *testing.T) {
+	store := &fakeStore{
+		threads:   []Thread{{ID: "session", Title: "session"}},
+		deleteErr: errors.New("app-server error (-32600): thread already has an active writer"),
+	}
+	m := newModel(store, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, _ := m.Update(keyMsg("d"))
+	m = updated.(model)
+	if !m.confirmDelete {
+		t.Fatal("delete confirmation did not open")
+	}
+
+	updated, cmd := m.Update(keyMsg("y"))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("delete command was not started")
+	}
+	updated, _ = m.Update(cmd().(deletedMsg))
+	m = updated.(model)
+	view := m.View()
+	if m.confirmDelete || m.err == nil {
+		t.Fatalf("delete error state = confirmDelete:%v err:%v", m.confirmDelete, m.err)
+	}
+	if !strings.Contains(view, "Error") || !strings.Contains(view, "currently in use") {
+		t.Fatalf("error modal missing: %q", view)
+	}
+
+	updated, _ = m.Update(keyMsg("esc"))
+	m = updated.(model)
+	if m.err != nil {
+		t.Fatalf("error modal was not dismissed: %v", m.err)
 	}
 }
 

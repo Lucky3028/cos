@@ -59,7 +59,6 @@ type model struct {
 	searching     bool
 	query         string
 	confirmDelete bool
-	status        string
 	err           error
 	width         int
 	height        int
@@ -93,7 +92,7 @@ func readConversation(store SessionStore, id string) tea.Cmd {
 func deleteThread(store SessionStore, scope ListScope, cwd, id string) tea.Cmd {
 	return func() tea.Msg {
 		if err := store.Delete(context.Background(), id); err != nil {
-			return deletedMsg{err: err}
+			return deletedMsg{err: deleteError(err)}
 		}
 		threads, err := store.List(context.Background(), scope, cwd)
 		if err != nil {
@@ -164,7 +163,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedByScope[scopeIndex(m.scope)] = m.selected
 			m.applyFilter()
 			m.hasConversation = false
-			m.status = "Session deleted"
 			if len(m.filtered) > 0 {
 				return m, readConversation(m.store, m.filtered[m.selected].ID)
 			}
@@ -187,17 +185,21 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key == "ctrl+c" || (key == "q" && !m.searching && !m.confirmDelete) {
 		return m, tea.Quit
 	}
+	if m.err != nil {
+		if key == "enter" || key == "esc" {
+			m.err = nil
+		}
+		return m, nil
+	}
 	if m.confirmDelete {
 		switch key {
 		case "y":
 			if thread, ok := m.selectedThread(); ok && !thread.Active {
 				m.loading = true
-				m.status = "Deleting…"
 				return m, deleteThread(m.store, m.scope, m.cwd, thread.ID)
 			}
 		case "n", "esc":
 			m.confirmDelete = false
-			m.status = "Delete cancelled"
 		}
 		return m, nil
 	}
@@ -241,7 +243,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case tea.KeyEsc:
-		m.status, m.err = "", nil
+		m.err = nil
 		return m, nil
 	}
 	switch key {
@@ -267,19 +269,16 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scopeVisited[targetScope] = true
 		}
 		m.selected = m.selectedByScope[targetScope]
-		m.loading, m.status, m.err = true, "", nil
+		m.loading, m.err = true, nil
 		return m, loadThreads(m.store, m.scope, m.cwd)
 	case "p":
 		m.showConversationPreview = !m.showConversationPreview
-		if m.showConversationPreview {
-			m.status = "Conversation preview shown"
-		} else {
-			m.status = "Conversation preview hidden"
+		if !m.showConversationPreview {
 			m.pane = listPane
 		}
 		return m, nil
 	case "r":
-		m.loading, m.status, m.err = true, "", nil
+		m.loading, m.err = true, nil
 		return m, loadThreads(m.store, m.scope, m.cwd)
 	case "d":
 		thread, ok := m.selectedThread()
@@ -287,7 +286,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if thread.Active {
-			m.err = fmt.Errorf("active session cannot be deleted")
+			m.err = fmt.Errorf("this session is currently in use and cannot be deleted")
 		} else {
 			m.confirmDelete = true
 			m.err = nil
@@ -297,7 +296,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
-	if m.confirmDelete {
+	if m.confirmDelete || m.err != nil {
 		return m, nil
 	}
 	leftWidth, _ := m.paneWidths()
@@ -497,6 +496,9 @@ func (m model) View() string {
 		return "Loading cos…"
 	}
 	base := m.renderBaseView()
+	if m.err != nil {
+		return overlayPopup(base, m.renderErrorPopup(), m.width, m.height)
+	}
 	if m.confirmDelete {
 		return overlayPopup(base, m.renderDeleteConfirmation(), m.width, m.height)
 	}
@@ -547,6 +549,25 @@ func (m model) renderDeleteConfirmation() string {
 	content := lipgloss.NewStyle().Bold(true).Render("Delete session?") + "\n\n" +
 		lipgloss.NewStyle().Foreground(lipgloss.Color("#F25D94")).Render(title) + "\n\n" +
 		"This permanently deletes the session." + "\n\n" +
+		actions
+	dialog := lipgloss.NewStyle().
+		Width(dialogWidth).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#F25D94")).
+		Padding(1, 2).
+		Render(content)
+	return dialog
+}
+
+func (m model) renderErrorPopup() string {
+	dialogWidth := min(72, max(1, m.width-8))
+	contentWidth := max(1, dialogWidth-4)
+	message := lipgloss.NewStyle().Width(contentWidth).Foreground(lipgloss.Color("#F25D94")).Render(m.err.Error())
+	actions := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(
+		lipgloss.NewStyle().Bold(true).Render("Enter / Esc") + " close",
+	)
+	content := lipgloss.NewStyle().Bold(true).Render("Error") + "\n\n" +
+		message + "\n\n" +
 		actions
 	dialog := lipgloss.NewStyle().
 		Width(dialogWidth).
@@ -721,13 +742,14 @@ func (m model) renderStatus() string {
 	if m.searching {
 		return "type to search  Enter apply  Esc cancel"
 	}
-	if m.err != nil {
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("#F25D94")).Render("Error: " + m.err.Error())
-	}
-	if m.status != "" {
-		return m.status + "  " + muted
-	}
 	return muted
+}
+
+func deleteError(err error) error {
+	if strings.Contains(err.Error(), "active writer") {
+		return fmt.Errorf("this session is currently in use and cannot be deleted")
+	}
+	return err
 }
 
 func mutedText(value string) string {
