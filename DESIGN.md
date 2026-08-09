@@ -20,6 +20,12 @@ Codex の JSONL ファイルは直接編集せず、`codex app-server --stdio` �
 - コマンド実行、ファイル変更、MCP 操作などの活動要約
 - 確認付きの session 完全削除
 
+`thread/delete` は対象 session の子孫も削除するため、cos は削除確認時と削除実行時に
+writer lock、最新状態、全階層の子孫を確認する。確認できない場合や子孫が見つかった
+場合は fail-closed とする。ただし app-server の削除APIには「子孫がない場合のみ削除」
+という原子的な事前条件がないため、別クライアントが確認後に子孫を生成する競合は
+cos 単独では完全に防げない。
+
 ### 対象外
 
 - アーカイブ済み session
@@ -62,7 +68,9 @@ codex app-server --stdio
 - `initialize`
 - `thread/list`
 - `thread/read`
+- `thread/turns/list`（paginated thread の会話取得 fallback）
 - `thread/delete`
+- 子孫確認用の `thread/list`（`ancestorThreadId`、通常・アーカイブ双方）
 
 `thread/list` の基本パラメータは以下のとおり。
 
@@ -75,13 +83,36 @@ codex app-server --stdio
 }
 ```
 
-cwd 表示では起動時に取得した絶対パスを `cwd` に指定する。全体表示では `cwd` を省略する。ページングの `nextCursor` が返る限り、一覧を継続取得する。
+cwd 表示では起動時に取得した絶対パスを `cwd` に指定する。全体表示では `cwd` を省略する。
+一覧は常に1ページ（最大100件）だけ取得し、`nextCursor` は UI が保持して次ページを
+要求する。前ページへ戻るため、UI は取得済みの開始 cursor の履歴だけを保持する。
+
+検索時は thread/list のページを逐次走査し、title・preview・cwd を cos 側で照合する。
+一致が見つかった場合は、その app-server 1ページ内の一致をすべて1ページの検索結果として
+返す。一致しない app-server ページは読み飛ばす。最大100ページ（最大10,000 session）までとし、
+上限に達した場合は `ThreadPage.Incomplete` を設定して検索結果が不完全であることを UI に表示する。
+`ThreadListRequest.SearchPages` と `ThreadPage.ScannedPages` で、UI のページ移動をまたいで走査数を
+引き継ぐ。cursor の循環はエラーとして停止する。
 
 app-server のバージョンによって `thread/list` の `data` は配列、または
 `{ "items": [...], "nextCursor": "..." }` のオブジェクトで返る場合がある。
 通信層の境界で両方の形式を受け入れ、UI 層には同じ session 一覧として渡す。
 
-JSON-RPC の reader は、レスポンスの間に挿入される通知を無視して pending request に対応するレスポンスだけを返す。app-server の終了や stdio の切断はエラーとして UI に通知する。
+`thread/read` の `includeTurns: true` が利用できない app-server では、metadata-only の
+`thread/read` 後に `thread/turns/list` を使って会話をページ取得する。
+
+会話履歴は新しい turn から取得し、最大 100 turn、本文合計 1 MiB で読み込みを停止する。
+取得した turn は表示時に時系列順へ戻す。上限で省略した場合は `Conversation.Truncated`
+を設定し、右ペインに省略を表示する。`includeTurns: true` が使える旧サーバーでも、
+取得後に同じ上限を適用する。
+
+JSON-RPC の reader は、レスポンスの間に挿入される通知を無視して pending request に対応するレスポンスだけを返す。JSONL 1メッセージは改行を含め最大2 MiBとし、デコード前に超過を拒否する。app-server の終了、stdio の切断、不正JSON、メッセージ上限超過は、要求の完全な書き込み後なら結果不明として扱う。書き込み済み要求の応答タイムアウトも同じ削除結果照合経路に入り、書き込み前のキャンセル・失敗とは区別する。
+
+UI の各非同期操作には 30 秒の deadline を設定する。session 選択、scope 切り替え、再読み込み、
+削除・再開確認などで新しい操作を開始した場合、前の操作の context をキャンセルし、応答を待つ
+RPC の pending entry も削除する。stdio への書き込みがキャンセル時点で停止している場合は
+接続を閉じて書き込み goroutine を解放する。app-server プロセスの寿命は個別 request の context
+から分離し、接続が閉じた場合は次の操作で再接続する。
 
 ## 5. ドメインモデル
 
@@ -89,11 +120,16 @@ JSON-RPC の reader は、レスポンスの間に挿入される通知を無視
 
 ```go
 type SessionStore interface {
-    List(ctx context.Context, scope ListScope, cwd string) ([]Thread, error)
+    List(ctx context.Context, request ThreadListRequest) (ThreadPage, error)
+    ListDescendants(ctx context.Context, id string) ([]Thread, error)
     Read(ctx context.Context, id string) (Conversation, error)
     Delete(ctx context.Context, id string) error
 }
 ```
+
+`ThreadPage` は現在ページの session、`NextCursor`、今回走査した app-server ページ数を含む。
+通常一覧の UI 保持量は1ページに限定する。タイトル・preview・cwd の検索は検索上限に達した
+場合も、取得できた結果を表示しつつ不完全検索であることを通知する。
 
 API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を true にする。active session は一覧に表示するが削除・再開できない。
 
@@ -142,14 +178,23 @@ API の thread status が `{ "type": "active" }` の場合、`Thread.Active` を
 - 配色はオレンジを基調とし、activity は灰色、assistant は黄色系、user は緑系で表示する。
 - ステータスバーには一時的な操作結果を表示せず、操作ヘルプのみを表示する。
 
-cwd 表示と全体表示では選択位置を独立して保持する。初めて切り替える scope
-では現在の選択位置を初期値として使用し、2 回目以降はその scope で最後に
-選択していた位置を復元する。取得件数が異なる場合は、その一覧の末尾を超えない
-範囲に補正する。
+cwd 表示と全体表示では選択位置と cursor 履歴を独立して扱う。`j/k` が現在ページの
+端に到達したとき、次 cursor または履歴上の前 cursor があればページを取得する。
+終端では循環せず停止する。取得件数が異なる場合は、そのページの末尾を超えない範囲に補正する。
+
+app-server 由来の title、preview、cwd、会話本文、activity summary、エラー文字列は、
+ANSI/OSC シーケンスと C0/C1/DEL 制御文字を除去してから表示する。会話本文の改行は保持し、
+一覧や activity などの単一行表示では空白へ正規化する。
 
 ### 削除確認
 
-`d` を押した時点で対象 session の writer lock と `thread/read` の最新状態を確認する。writer lock が取得できない、または active の場合は削除確認を表示せず、使用中で削除できないことをエラーポップアップで通知する。非 active かつ writer lock が空いている場合のみ削除確認を表示する。
+`d` を押した時点で対象 session の writer lock、`thread/read` の最新状態、全階層の
+子孫を確認する。writer lock の確認に失敗した、active だった、子孫が存在した、
+または子孫確認に失敗した場合は削除確認を表示しない。非 active、writer lock が
+空いており、子孫が存在しないことを確認できた場合のみ削除確認を表示する。
+
+`y` を押した時点でも同じ確認を再実行する。確認後に状態が変化した場合や、子孫・
+writer lock の検証に失敗した場合は `thread/delete` を呼ばない。
 
 `Enter` を押した時点でも同じ確認を行う。writer lock が取得できない、または active の場合は 再開せず、削除・再開ともに使用中で実行できないことをエラーポップアップで通知する。非 active の場合は確認画面を表示せず TUI を終了する。
 
@@ -158,7 +203,15 @@ cwd 表示と全体表示では選択位置を独立して保持する。初め�
 表示し、確認文の上下には空行を入れる。`y` と `n / Esc` の選択肢はポップアップ
 内の中央に揃える。
 
-削除確認後に別の writer が session を使用し始める競合は、`thread/delete` のエラーとして検知する。削除成功後は同じ scope で一覧を再取得し、削除対象 ID が残っていないことを確認する。削除または再取得に失敗した場合は、現在の一覧を保持したまま中央エラーポップアップを表示する。
+削除確認後に別の writer が session を使用し始める競合は、再確認または
+`thread/delete` のエラーとして検知する。書き込み済み削除要求の応答が timeout、接続終了、
+不正JSON、メッセージ上限超過になった場合は、新しい5秒 context で app-server に再接続し、
+`thread/read` を行う。不在を確認できた場合のみ成功扱いにし、存在、再接続失敗、照合不能は
+結果不明エラーとする。`thread/delete` は自動再実行しない。削除の成否にかかわらず同じ
+scope・ページを再取得し、現在の一覧が stale のまま残らないようにする。
+
+子孫生成と削除の間の競合は、削除直前の再確認で窓を小さくするが、app-server のAPI仕様上
+完全な原子性は保証しない。
 
 ### エラー表示
 
@@ -195,6 +248,7 @@ go build ./...
 - JSON-RPC の初期化、通知混在、エラー、app-server 終了
 - `thread/list` の cwd 指定とページング
 - `thread/list` の `data` 配列・オブジェクト両形式
+- 検索の app-server ページ境界、100ページ上限、cursor 循環停止
 - 会話項目の変換と活動要約
 - タイトル・preview・cwd 検索
 - active session の削除禁止
@@ -205,6 +259,15 @@ go build ./...
 - scope ごとの選択位置保持
 - マウス操作、端末リサイズ、会話プレビュー切り替え
 - 中央削除確認ポップアップ
+- 書き込み済み削除要求の接続終了・不正JSON・再接続後照合
+- 子孫 session の存在・取得失敗時の削除禁止
+- 削除確認後に子孫が増えた場合の削除直前再確認
+- paginated thread の会話取得 fallback
+- Unicode検索語のBackspace、scope切替失敗、一覧表示範囲外クリック
+- 非同期応答の scope、cwd、対象 ID、request 世代による破棄
+- 非同期 request のキャンセル、pending 除去、書き込み停止時の stdio 切断
+- 会話履歴の 100 turn / 1 MiB 制限と省略表示
+- ANSI、OSC、BEL、Backspace、CR などの表示文字サニタイズ
 
 ## 9. 設計上の前提
 
@@ -213,3 +276,5 @@ go build ./...
 - cwd の判定は親子関係ではなく、Codex に保存された cwd との文字列完全一致とする。
 - 削除は app-server の `thread/delete` に任せ、ローカルファイルを直接操作しない。
 - 削除は不可逆操作のため、必ず確認画面を挟む。
+- 削除の「子孫なし」保証は確認時点のbest-effortであり、原子的なleaf-only削除APIが
+  app-serverに追加されるまで別クライアントとの競合を完全には防げない。

@@ -7,12 +7,16 @@ import (
 	"syscall"
 )
 
-func hasActiveWriter(threadID string) bool {
+func hasActiveWriter(threadID string) (bool, error) {
+	return writerLockStatus(threadID)
+}
+
+func writerLockStatus(threadID string) (bool, error) {
 	lockPath, err := threadWriterLockPath(threadID)
 	if err != nil {
-		return false
+		return false, err
 	}
-	return isLocked(lockPath)
+	return lockStatus(lockPath)
 }
 
 func threadWriterLockPath(threadID string) (string, error) {
@@ -28,16 +32,29 @@ func threadWriterLockPath(threadID string) (string, error) {
 }
 
 func isLocked(path string) bool {
+	locked, err := lockStatus(path)
+	return err == nil && locked
+}
+
+func lockStatus(path string) (bool, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return false
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
 	defer file.Close()
 
 	err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		return false
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_UN); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
-	return errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN)
+	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+		return true, nil
+	}
+	return false, err
 }

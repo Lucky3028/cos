@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -36,6 +37,30 @@ func TestConversationItemsHideReasoningAndSummarizeActivities(t *testing.T) {
 	}
 	if !strings.Contains(items[2].Text, "go test ./...") || !strings.Contains(items[3].Text, "main.go") || !strings.Contains(items[4].Text, "docs/search") {
 		t.Fatalf("activities = %#v", items[2:])
+	}
+}
+
+func TestAppServerTextIsSanitizedWithoutDroppingConversationNewlines(t *testing.T) {
+	unsafe := "\x1b[31mred\x1b[0m\x1b]0;title\a\x07\b\r\nnext\u0080"
+	name := unsafe
+	thread := apiThread{Name: &name, Preview: unsafe, CWD: unsafe}.toThread()
+	if strings.ContainsAny(thread.Title+thread.Preview+thread.CWD, "\x1b\x07\b\r\u0080") {
+		t.Fatalf("thread fields retained control characters: %#v", thread)
+	}
+	if strings.Contains(thread.Title, "red") == false || strings.Contains(thread.Title, "next") == false {
+		t.Fatalf("sanitized title lost content: %q", thread.Title)
+	}
+
+	item := conversationItem(json.RawMessage("{\"type\":\"agentMessage\",\"text\":\"first\\u001b[2J\\nsecond\\r\\b\\u0007\"}"))
+	if item.Text != "first\nsecond" {
+		t.Fatalf("sanitized conversation = %q", item.Text)
+	}
+	activity := conversationItem(json.RawMessage("{\"type\":\"mcpToolCall\",\"server\":\"srv\\u001b[31m\",\"tool\":\"tool\\u0007\"}"))
+	if strings.ContainsAny(activity.Text, "\x1b\a") {
+		t.Fatalf("sanitized activity retained control characters: %q", activity.Text)
+	}
+	if strings.ContainsAny((&rpcError{Code: 1, Message: unsafe}).Error(), "\x1b\a\b\r\u0080") {
+		t.Fatal("sanitized error retained control characters")
 	}
 }
 
@@ -69,19 +94,93 @@ func TestFilteringUsesTitlePreviewAndExactCWD(t *testing.T) {
 	}
 }
 
-type fakeStore struct {
-	threads          []Thread
-	readConversation Conversation
-	readErr          error
-	deleted          []string
-	deleteErr        error
+func TestHeaderSanitizesLaunchCWDOnlyForDisplay(t *testing.T) {
+	m := newModel(nil, "/work/\x1b]0;unsafe\a\nproject")
+	m.width, m.height, m.loading = 80, 12, false
+	view := ansi.Strip(m.View())
+	header := strings.Split(view, "\n")[0]
+	if strings.ContainsAny(header, "\x1b\a\r") {
+		t.Fatalf("header retained terminal control characters: %q", header)
+	}
+	if !strings.Contains(header, "/work/") || !strings.Contains(header, "project") {
+		t.Fatalf("sanitized cwd lost display content: %q", header)
+	}
 }
 
-func (f *fakeStore) List(context.Context, ListScope, string) ([]Thread, error) {
-	return append([]Thread(nil), f.threads...), nil
+type fakeStore struct {
+	threads           []Thread
+	listPages         map[string]ThreadPage
+	listRequests      []ThreadListRequest
+	readConversation  Conversation
+	readByID          map[string]Conversation
+	readIDs           []string
+	readErr           error
+	descendants       []Thread
+	descendantResults [][]Thread
+	descendantCalls   int
+	descendantsErr    error
+	deleted           []string
+	deleteErr         error
 }
-func (f *fakeStore) Read(context.Context, string) (Conversation, error) {
+
+type cancellationStore struct {
+	readStarted  chan string
+	readCanceled chan string
+	listStarted  chan struct{}
+	listCanceled chan struct{}
+}
+
+func (s *cancellationStore) List(ctx context.Context, _ ThreadListRequest) (ThreadPage, error) {
+	select {
+	case s.listStarted <- struct{}{}:
+	case <-ctx.Done():
+		return ThreadPage{}, ctx.Err()
+	}
+	<-ctx.Done()
+	s.listCanceled <- struct{}{}
+	return ThreadPage{}, ctx.Err()
+}
+
+func (s *cancellationStore) Read(ctx context.Context, id string) (Conversation, error) {
+	select {
+	case s.readStarted <- id:
+	case <-ctx.Done():
+		return Conversation{}, ctx.Err()
+	}
+	<-ctx.Done()
+	s.readCanceled <- id
+	return Conversation{}, ctx.Err()
+}
+
+func (s *cancellationStore) ListDescendants(context.Context, string) ([]Thread, error) {
+	return nil, nil
+}
+
+func (s *cancellationStore) Delete(context.Context, string) error { return nil }
+
+func (f *fakeStore) List(_ context.Context, request ThreadListRequest) (ThreadPage, error) {
+	f.listRequests = append(f.listRequests, request)
+	if page, ok := f.listPages[request.Cursor]; ok {
+		return page, nil
+	}
+	return ThreadPage{Threads: append([]Thread(nil), f.threads...)}, nil
+}
+
+func (f *fakeStore) Read(_ context.Context, id string) (Conversation, error) {
+	f.readIDs = append(f.readIDs, id)
+	if conversation, ok := f.readByID[id]; ok {
+		return conversation, f.readErr
+	}
 	return f.readConversation, f.readErr
+}
+func (f *fakeStore) ListDescendants(context.Context, string) ([]Thread, error) {
+	if f.descendantCalls < len(f.descendantResults) {
+		result := f.descendantResults[f.descendantCalls]
+		f.descendantCalls++
+		return append([]Thread(nil), result...), nil
+	}
+	f.descendantCalls++
+	return append([]Thread(nil), f.descendants...), f.descendantsErr
 }
 func (f *fakeStore) Delete(_ context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
@@ -193,7 +292,7 @@ func TestEnterDoesNotResumeDuringModalOrSearch(t *testing.T) {
 			setup(&m)
 			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 			result := updated.(model)
-			if cmd != nil || result.resumeRequested || result.checkingResume {
+			if result.resumeRequested || result.checkingResume {
 				t.Fatalf("resume started: requested:%v checking:%v cmd:%v", result.resumeRequested, result.checkingResume, cmd != nil)
 			}
 		})
@@ -228,6 +327,270 @@ func TestDeleteChecksForActiveThreadBeforeConfirmation(t *testing.T) {
 	}
 }
 
+func TestDescendantSessionCannotBeDeleted(t *testing.T) {
+	store := &fakeStore{
+		threads:          []Thread{{ID: "parent", Title: "parent"}},
+		descendants:      []Thread{{ID: "child"}},
+		readConversation: Conversation{Thread: Thread{ID: "parent"}},
+	}
+	m := newModel(store, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, cmd := m.Update(keyMsg("d"))
+	m = updated.(model)
+	if cmd == nil || !m.checkingDelete {
+		t.Fatalf("descendant check was not started: checking=%v cmd=%v", m.checkingDelete, cmd != nil)
+	}
+	updated, _ = m.Update(cmd().(deleteCheckMsg))
+	m = updated.(model)
+	if m.confirmDelete || m.checkingDelete || m.err == nil {
+		t.Fatalf("descendant delete state = confirm:%v checking:%v err:%v", m.confirmDelete, m.checkingDelete, m.err)
+	}
+	if len(store.deleted) != 0 {
+		t.Fatalf("descendant-bearing session was deleted: %#v", store.deleted)
+	}
+}
+
+func TestDescendantVerificationFailureIsFailClosed(t *testing.T) {
+	store := &fakeStore{
+		threads:          []Thread{{ID: "parent"}},
+		readConversation: Conversation{Thread: Thread{ID: "parent"}},
+		descendantsErr:   errors.New("list unavailable"),
+	}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = store.threads
+	m.applyFilter()
+	updated, cmd := m.Update(keyMsg("d"))
+	m = updated.(model)
+	updated, _ = m.Update(cmd().(deleteCheckMsg))
+	m = updated.(model)
+	if m.confirmDelete || m.err == nil || len(store.deleted) != 0 {
+		t.Fatalf("verification failure was not fail-closed: confirm=%v err=%v deleted=%v", m.confirmDelete, m.err, store.deleted)
+	}
+}
+
+func TestDeleteRechecksDescendantsBeforeExecuting(t *testing.T) {
+	store := &fakeStore{
+		threads:          []Thread{{ID: "parent", Title: "parent"}},
+		readConversation: Conversation{Thread: Thread{ID: "parent"}},
+		descendantResults: [][]Thread{
+			{},
+			{{ID: "child"}},
+		},
+	}
+	m := newModel(store, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = store.threads
+	m.applyFilter()
+
+	updated, cmd := m.Update(keyMsg("d"))
+	m = updated.(model)
+	updated, _ = m.Update(cmd().(deleteCheckMsg))
+	m = updated.(model)
+	if !m.confirmDelete {
+		t.Fatal("delete confirmation did not open")
+	}
+
+	updated, cmd = m.Update(keyMsg("y"))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("delete command was not started")
+	}
+	updated, _ = m.Update(cmd().(deletedMsg))
+	m = updated.(model)
+	if len(store.deleted) != 0 || m.err == nil || !strings.Contains(m.err.Error(), "descendant") {
+		t.Fatalf("late descendant was not blocked: deleted=%v err=%v", store.deleted, m.err)
+	}
+}
+
+func TestStaleListAndConversationResponsesAreDiscarded(t *testing.T) {
+	store := &fakeStore{}
+	m := newModel(store, "/work")
+	m.loading = true
+	m.requestGeneration = 5
+	m.scope = AllThreads
+	m.threads = []Thread{{ID: "new", Title: "new"}}
+	m.applyFilter()
+	old := threadsLoadedMsg{threads: []Thread{{ID: "old"}}, requestMeta: requestMeta{generation: 4, scope: CurrentDirectory, cwd: "/work"}}
+	updated, cmd := m.Update(old)
+	m = updated.(model)
+	if cmd != nil || len(m.threads) != 1 || m.threads[0].ID != "new" || !m.loading {
+		t.Fatalf("stale list changed model: loading=%v threads=%#v cmd=%v", m.loading, m.threads, cmd != nil)
+	}
+
+	m.filtered = []Thread{{ID: "new"}}
+	m.selected = 0
+	m.hasConversation = true
+	m.conversation = Conversation{Thread: Thread{ID: "new"}}
+	stale := conversationLoadedMsg{
+		conversation: Conversation{Thread: Thread{ID: "new", Title: "old conversation"}},
+		requestMeta:  requestMeta{generation: 4, scope: CurrentDirectory, cwd: "/work", id: "new"},
+	}
+	updated, cmd = m.Update(stale)
+	m = updated.(model)
+	if cmd != nil || m.conversation.Thread.Title != "" {
+		// The original conversation title is empty; a stale response must not
+		// replace it.
+		t.Fatalf("stale conversation changed model: conversation=%#v cmd=%v", m.conversation, cmd != nil)
+	}
+}
+
+func TestSelectionMovesAcrossPagesWithoutWrapping(t *testing.T) {
+	store := &fakeStore{listPages: map[string]ThreadPage{
+		"next": {Threads: []Thread{{ID: "second"}}, NextCursor: ""},
+		"":     {Threads: []Thread{{ID: "first"}}, NextCursor: "next"},
+	}}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = store.listPages[""].Threads
+	m.nextCursor = "next"
+	m.pageCursor = ""
+	m.applyFilter()
+
+	updated, cmd := m.Update(keyMsg("j"))
+	m = updated.(model)
+	if cmd == nil || !m.loading || len(m.previousCursors) != 1 {
+		t.Fatalf("next page not requested: loading=%v previous=%v command=%v", m.loading, m.previousCursors, cmd != nil)
+	}
+	pageMessage := cmd().(threadsLoadedMsg)
+	if request := store.listRequests[0]; request.Cursor != "next" {
+		t.Fatalf("next page cursor = %q", request.Cursor)
+	}
+	updated, _ = m.Update(pageMessage)
+	m = updated.(model)
+	if m.selectedID() != "second" || m.nextCursor != "" {
+		t.Fatalf("second page state = selected:%q next:%q", m.selectedID(), m.nextCursor)
+	}
+
+	updated, cmd = m.Update(keyMsg("k"))
+	m = updated.(model)
+	if cmd == nil || !m.loading || len(m.previousCursors) != 0 {
+		t.Fatalf("previous page not requested: loading=%v previous=%v command=%v", m.loading, m.previousCursors, cmd != nil)
+	}
+	pageMessage = cmd().(threadsLoadedMsg)
+	if request := store.listRequests[1]; request.Cursor != "" {
+		t.Fatalf("previous page cursor = %q", request.Cursor)
+	}
+	updated, _ = m.Update(pageMessage)
+	m = updated.(model)
+	if m.selectedID() != "first" {
+		t.Fatalf("previous page selection = %q", m.selectedID())
+	}
+	updated, cmd = m.Update(keyMsg("j"))
+	m = updated.(model)
+	if cmd == nil {
+		t.Fatal("next page could not be requested after returning to the first page")
+	}
+}
+
+func TestSelectionChangeCancelsPreviousConversationRequest(t *testing.T) {
+	store := &cancellationStore{readStarted: make(chan string, 2), readCanceled: make(chan string, 1)}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = []Thread{{ID: "a"}, {ID: "b"}}
+	m.applyFilter()
+	first := m.beginConversation("a")
+	go first()
+	select {
+	case id := <-store.readStarted:
+		if id != "a" {
+			t.Fatalf("first read id = %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first conversation request did not start")
+	}
+	updated, second := m.Update(keyMsg("j"))
+	m = updated.(model)
+	if second == nil || m.selectedID() != "b" {
+		t.Fatalf("selection change = selected:%q command:%v", m.selectedID(), second != nil)
+	}
+	select {
+	case id := <-store.readCanceled:
+		if id != "a" {
+			t.Fatalf("canceled read id = %q", id)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("previous conversation request was not canceled")
+	}
+}
+
+func TestScopeChangeCancelsPreviousListRequest(t *testing.T) {
+	store := &cancellationStore{listStarted: make(chan struct{}, 2), listCanceled: make(chan struct{}, 1)}
+	m := newModel(store, "/work")
+	first := m.beginListLoad()
+	go first()
+	select {
+	case <-store.listStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first list request did not start")
+	}
+	updated, second := m.Update(keyMsg("a"))
+	m = updated.(model)
+	if second == nil || m.scope != AllThreads {
+		t.Fatalf("scope change = scope:%v command:%v", m.scope, second != nil)
+	}
+	select {
+	case <-store.listCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("previous list request was not canceled")
+	}
+}
+
+func TestSearchReloadsConversationForNewSelection(t *testing.T) {
+	store := &fakeStore{readByID: map[string]Conversation{
+		"a": {Thread: Thread{ID: "a"}},
+		"b": {Thread: Thread{ID: "b"}},
+	}}
+	m := newModel(store, "/work")
+	m.loading = false
+	m.threads = []Thread{{ID: "a", Title: "alpha"}, {ID: "b", Title: "beta"}}
+	m.applyFilter()
+	m.hasConversation = true
+	m.conversation = Conversation{Thread: Thread{ID: "a"}}
+	updated, _ := m.Update(keyMsg("/"))
+	m = updated.(model)
+	updated, cmd := m.Update(keyMsg("b"))
+	m = updated.(model)
+	if cmd == nil || m.selectedID() != "b" {
+		t.Fatalf("search did not select b: selected=%s cmd=%v", m.selectedID(), cmd != nil)
+	}
+	conversation := cmd().(conversationLoadedMsg)
+	if conversation.conversation.Thread.ID != "b" {
+		t.Fatalf("search read session = %q", conversation.conversation.Thread.ID)
+	}
+}
+
+func TestSearchBackspaceRemovesOneUnicodeRune(t *testing.T) {
+	m := newModel(nil, "/work")
+	m.loading = false
+	m.searching = true
+	m.query = "日本"
+	m.threads = []Thread{{ID: "session", Title: "日本語"}}
+	m.applyFilter()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = updated.(model)
+	if m.query != "日" || len(m.filtered) != 1 || m.filtered[0].ID != "session" {
+		t.Fatalf("unicode backspace state = query:%q filtered:%#v", m.query, m.filtered)
+	}
+}
+
+func TestHiddenPreviewUsesFullWidthForMouseSelection(t *testing.T) {
+	m := newModel(&fakeStore{}, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.showConversationPreview = false
+	m.threads = makeTestThreads(3)
+	m.applyFilter()
+	updated, _ := m.Update(tea.MouseMsg{X: 70, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	m = updated.(model)
+	if m.pane != listPane || m.selected != 1 {
+		t.Fatalf("full-width click did not select list item: pane=%v selected=%d", m.pane, m.selected)
+	}
+}
+
 func TestActiveWriterLockIsDetectedBeforeConfirmation(t *testing.T) {
 	lockDir := t.TempDir()
 	lockPath := filepath.Join(lockDir, "thread.lock")
@@ -242,6 +605,34 @@ func TestActiveWriterLockIsDetectedBeforeConfirmation(t *testing.T) {
 
 	if !isLocked(lockPath) {
 		t.Fatal("active writer lock was not detected")
+	}
+}
+
+func TestWriterLockStatusDistinguishesMissingIdleActiveAndIOError(t *testing.T) {
+	dir := t.TempDir()
+	locked, err := lockStatus(filepath.Join(dir, "missing.lock"))
+	if err != nil || locked {
+		t.Fatalf("missing lock = locked:%v err:%v", locked, err)
+	}
+	path := filepath.Join(dir, "idle.lock")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	locked, err = lockStatus(path)
+	if err != nil || locked {
+		t.Fatalf("idle lock = locked:%v err:%v", locked, err)
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	locked, err = lockStatus(path)
+	if err != nil || !locked {
+		t.Fatalf("active lock = locked:%v err:%v", locked, err)
+	}
+	if locked, err = lockStatus("\x00"); err == nil || locked {
+		t.Fatalf("I/O lock = locked:%v err:%v", locked, err)
 	}
 }
 
@@ -317,6 +708,30 @@ func TestScopeSwitchRestoresIndependentSelection(t *testing.T) {
 	}
 }
 
+func TestScopeSwitchErrorClearsPreviousScopeState(t *testing.T) {
+	m := newModel(&fakeStore{}, "/work")
+	m.width, m.height, m.loading = 80, 20, false
+	m.threads = []Thread{{ID: "old", Title: "old"}}
+	m.applyFilter()
+	m.hasConversation = true
+	m.conversation = Conversation{Thread: Thread{ID: "old"}}
+
+	updated, _ := m.Update(keyMsg("a"))
+	m = updated.(model)
+	if m.scope != AllThreads || len(m.threads) != 0 || len(m.filtered) != 0 || m.hasConversation {
+		t.Fatalf("scope switch retained old state: scope=%v threads=%#v filtered=%#v conversation=%v", m.scope, m.threads, m.filtered, m.hasConversation)
+	}
+
+	updated, _ = m.Update(threadsLoadedMsg{
+		err:         errors.New("all threads unavailable"),
+		requestMeta: requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd},
+	})
+	m = updated.(model)
+	if m.err == nil || len(m.threads) != 0 || len(m.filtered) != 0 || m.hasConversation {
+		t.Fatalf("scope error exposed stale state: err=%v threads=%#v filtered=%#v conversation=%v", m.err, m.threads, m.filtered, m.hasConversation)
+	}
+}
+
 func TestMouseClickSelectsThreadAndWheelScrollsConversation(t *testing.T) {
 	store := &fakeStore{}
 	m := newModel(store, "/work")
@@ -349,6 +764,22 @@ func TestMouseClickSelectsThreadAndWheelScrollsConversation(t *testing.T) {
 	m = updated.(model)
 	if m.pane != conversationPane || m.viewport.YOffset == 0 {
 		t.Fatalf("mouse wheel did not scroll: pane=%v offset=%d", m.pane, m.viewport.YOffset)
+	}
+}
+
+func TestMouseClickOutsideVisibleListDoesNotSelectHiddenThread(t *testing.T) {
+	m := newModel(&fakeStore{}, "/work")
+	m.width, m.height, m.loading = 80, 12, false
+	m.threads = makeTestThreads(20)
+	m.applyFilter()
+	m.selected = 0
+
+	for _, y := range []int{m.height - 2, m.height - 1} {
+		updated, _ := m.Update(tea.MouseMsg{X: 2, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+		m = updated.(model)
+		if m.selected != 0 {
+			t.Fatalf("click at y=%d selected hidden thread %d", y, m.selected)
+		}
 	}
 }
 

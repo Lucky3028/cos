@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,29 +21,46 @@ const (
 	conversationPane
 )
 
+type requestMeta struct {
+	generation  uint64
+	scope       ListScope
+	cwd         string
+	cursor      string
+	query       string
+	searchPages int
+	id          string
+}
+
 type threadsLoadedMsg struct {
 	threads []Thread
+	page    ThreadPage
 	err     error
+	requestMeta
 }
 
 type conversationLoadedMsg struct {
 	conversation Conversation
 	err          error
+	requestMeta
 }
 
 type deletedMsg struct {
 	threads []Thread
+	page    ThreadPage
 	err     error
+	requestMeta
 }
 
 type deleteCheckMsg struct {
 	conversation Conversation
 	err          error
+	requestMeta
 }
 
 type resumeCheckMsg struct {
 	conversation Conversation
 	err          error
+	requestMeta
 }
 
 type model struct {
@@ -57,88 +75,326 @@ type model struct {
 	showConversationPreview bool
 	// Keep a cursor per scope so a short result set cannot overwrite the
 	// position remembered for the other scope.
-	selectedByScope [2]int
-	scopeVisited    [2]bool
-	pane            pane
+	selectedByScope     [2]int
+	scopeVisited        [2]bool
+	pageCursor          string
+	nextCursor          string
+	previousCursors     []string
+	previousSearchPages []int
+	pendingCursor       string
+	pendingSearchPages  int
+	pageSearchStart     int
+	searchPages         int
+	selectPageEnd       bool
+	searchIncomplete    bool
+	pane                pane
 
 	conversation    Conversation
 	hasConversation bool
 	viewport        viewport.Model
 
-	loading         bool
-	searching       bool
-	query           string
-	confirmDelete   bool
-	checkingDelete  bool
-	checkingResume  bool
-	resumeRequested bool
-	resumeSession   Thread
-	err             error
-	width           int
-	height          int
+	loading           bool
+	deleting          bool
+	requestGeneration uint64
+	searching         bool
+	query             string
+	confirmDelete     bool
+	checkingDelete    bool
+	checkingResume    bool
+	resumeRequested   bool
+	resumeSession     Thread
+	requestContext    context.Context
+	requestCancel     context.CancelFunc
+	err               error
+	width             int
+	height            int
 }
 
 func newModel(store SessionStore, cwd string) model {
+	ctx, cancel := context.WithTimeout(context.Background(), asyncRequestTimeout)
 	return model{
 		store: store, cwd: cwd, scope: CurrentDirectory, pane: listPane, loading: true,
 		viewport: viewport.New(1, 1), scopeVisited: [2]bool{true, false}, showConversationPreview: true,
+		requestGeneration: 1, requestContext: ctx, requestCancel: cancel,
 	}
 }
 
 func (m model) Init() tea.Cmd {
-	return loadThreads(m.store, m.scope, m.cwd)
+	if m.requestContext != nil && m.requestCancel != nil {
+		return loadThreadsWithContext(m.store, m.requestContext, m.requestCancel,
+			requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd, query: m.query})
+	}
+	return loadThreadsWithMeta(m.store, requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd, query: m.query})
+}
+
+func (m *model) nextRequest(id string) requestMeta {
+	m.requestGeneration++
+	return requestMeta{generation: m.requestGeneration, scope: m.scope, cwd: m.cwd, cursor: m.pendingCursor, query: m.query, searchPages: m.pendingSearchPages, id: id}
+}
+
+func (m *model) beginConversation(id string) tea.Cmd {
+	meta := m.nextRequest(id)
+	ctx, cancel := m.beginAsyncRequest()
+	m.hasConversation = false
+	return readConversationWithContext(m.store, ctx, cancel, meta)
+}
+
+func (m *model) beginListLoad() tea.Cmd {
+	m.pageCursor = ""
+	m.nextCursor = ""
+	m.previousCursors = nil
+	m.previousSearchPages = nil
+	m.pendingCursor = ""
+	m.pendingSearchPages = 0
+	m.pageSearchStart = 0
+	m.searchPages = 0
+	m.selectPageEnd = false
+	m.searchIncomplete = false
+	meta := m.nextRequest("")
+	ctx, cancel := m.beginAsyncRequest()
+	m.loading = true
+	m.err = nil
+	return loadThreadsWithContext(m.store, ctx, cancel, meta)
+}
+
+func (m *model) beginPageLoad(cursor string, selectEnd bool) tea.Cmd {
+	return m.beginPageLoadWithSearchPages(cursor, selectEnd, m.searchPages)
+}
+
+func (m *model) beginPageLoadWithSearchPages(cursor string, selectEnd bool, searchPages int) tea.Cmd {
+	m.pendingCursor = cursor
+	m.pendingSearchPages = searchPages
+	m.selectPageEnd = selectEnd
+	meta := m.nextRequest("")
+	ctx, cancel := m.beginAsyncRequest()
+	m.loading = true
+	m.err = nil
+	m.hasConversation = false
+	m.threads = nil
+	m.filtered = nil
+	return loadThreadsWithContext(m.store, ctx, cancel, meta)
+}
+
+const asyncRequestTimeout = 30 * time.Second
+
+func (m *model) beginAsyncRequest() (context.Context, context.CancelFunc) {
+	if m.requestCancel != nil {
+		m.requestCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), asyncRequestTimeout)
+	m.requestContext = ctx
+	m.requestCancel = cancel
+	return ctx, cancel
+}
+
+func (m *model) clearListState() {
+	m.threads = nil
+	m.filtered = nil
+	m.listOffset = 0
+	m.hasConversation = false
+	m.conversation = Conversation{}
+	m.viewport.SetContent("")
+}
+
+func (m model) matchesRequest(meta requestMeta, requireID bool) bool {
+	// Zero metadata is retained for small, synchronous unit-test messages and
+	// for callers of the legacy command helpers. Every real UI command carries
+	// a non-zero generation.
+	if meta.generation == 0 {
+		if requireID && meta.id != "" {
+			selected, ok := m.selectedThread()
+			return ok && selected.ID == meta.id
+		}
+		return true
+	}
+	if meta.generation != m.requestGeneration || meta.scope != m.scope || meta.cwd != m.cwd || meta.query != m.query {
+		return false
+	}
+	if requireID {
+		selected, ok := m.selectedThread()
+		return ok && selected.ID == meta.id
+	}
+	return true
 }
 
 func loadThreads(store SessionStore, scope ListScope, cwd string) tea.Cmd {
+	return loadThreadsWithMeta(store, requestMeta{scope: scope, cwd: cwd})
+}
+
+func loadThreadsWithMeta(store SessionStore, meta requestMeta) tea.Cmd {
+	return withAsyncRequest(func(ctx context.Context) tea.Msg {
+		return loadThreadsMessage(ctx, store, meta)
+	})
+}
+
+func loadThreadsWithContext(store SessionStore, ctx context.Context, cancel context.CancelFunc, meta requestMeta) tea.Cmd {
 	return func() tea.Msg {
-		threads, err := store.List(context.Background(), scope, cwd)
-		return threadsLoadedMsg{threads: threads, err: err}
+		defer cancel()
+		return loadThreadsMessage(ctx, store, meta)
+	}
+}
+
+func loadThreadsMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
+	page, err := store.List(ctx, ThreadListRequest{
+		Scope: meta.scope, CWD: meta.cwd, Cursor: meta.cursor,
+		Limit: defaultThreadPageSize, Query: meta.query, SearchPages: meta.searchPages,
+	})
+	return threadsLoadedMsg{page: page, err: err, requestMeta: meta}
+}
+
+func withAsyncRequest(fn func(context.Context) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), asyncRequestTimeout)
+		defer cancel()
+		return fn(ctx)
 	}
 }
 
 func readConversation(store SessionStore, id string) tea.Cmd {
+	return readConversationWithMeta(store, requestMeta{id: id})
+}
+
+func readConversationWithMeta(store SessionStore, meta requestMeta) tea.Cmd {
+	return withAsyncRequest(func(ctx context.Context) tea.Msg {
+		return readConversationMessage(ctx, store, meta)
+	})
+}
+
+func readConversationWithContext(store SessionStore, ctx context.Context, cancel context.CancelFunc, meta requestMeta) tea.Cmd {
 	return func() tea.Msg {
-		conversation, err := store.Read(context.Background(), id)
-		return conversationLoadedMsg{conversation: conversation, err: err}
+		defer cancel()
+		return readConversationMessage(ctx, store, meta)
 	}
+}
+
+func withManagedRequest(ctx context.Context, cancel context.CancelFunc, fn func(context.Context) tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		defer cancel()
+		return fn(ctx)
+	}
+}
+
+func readConversationMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
+	conversation, err := store.Read(ctx, meta.id)
+	return conversationLoadedMsg{conversation: conversation, err: err, requestMeta: meta}
 }
 
 func checkDelete(store SessionStore, id string) tea.Cmd {
-	return func() tea.Msg {
-		if hasActiveWriter(id) {
-			return deleteCheckMsg{conversation: Conversation{Thread: Thread{ID: id, Active: true}}}
-		}
-		conversation, err := store.Read(context.Background(), id)
-		return deleteCheckMsg{conversation: conversation, err: err}
+	return checkDeleteWithMeta(store, requestMeta{id: id})
+}
+
+func checkDeleteWithMeta(store SessionStore, meta requestMeta) tea.Cmd {
+	return withAsyncRequest(func(ctx context.Context) tea.Msg {
+		return checkDeleteMessage(ctx, store, meta)
+	})
+}
+
+func checkDeleteMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
+	locked, err := writerLockStatus(meta.id)
+	if err != nil {
+		return deleteCheckMsg{err: fmt.Errorf("check writer lock for session %s: %w", meta.id, err), requestMeta: meta}
 	}
+	if locked {
+		return deleteCheckMsg{conversation: Conversation{Thread: Thread{ID: meta.id, Active: true}}, requestMeta: meta}
+	}
+	conversation, err := store.Read(ctx, meta.id)
+	if err != nil {
+		return deleteCheckMsg{err: err, requestMeta: meta}
+	}
+	if conversation.Thread.Active {
+		return deleteCheckMsg{conversation: conversation, requestMeta: meta}
+	}
+	descendants, err := store.ListDescendants(ctx, meta.id)
+	if err != nil {
+		return deleteCheckMsg{err: fmt.Errorf("cannot verify descendants of session %s: %w", meta.id, err), requestMeta: meta}
+	}
+	if len(descendants) > 0 {
+		return deleteCheckMsg{err: descendantSessionError(meta.id, descendants), requestMeta: meta}
+	}
+	return deleteCheckMsg{conversation: conversation, requestMeta: meta}
 }
 
 func checkResume(store SessionStore, id string) tea.Cmd {
-	return func() tea.Msg {
-		if hasActiveWriter(id) {
-			return resumeCheckMsg{conversation: Conversation{Thread: Thread{ID: id, Active: true}}}
-		}
-		conversation, err := store.Read(context.Background(), id)
-		return resumeCheckMsg{conversation: conversation, err: err}
+	return checkResumeWithMeta(store, requestMeta{id: id})
+}
+
+func checkResumeWithMeta(store SessionStore, meta requestMeta) tea.Cmd {
+	return withAsyncRequest(func(ctx context.Context) tea.Msg {
+		return checkResumeMessage(ctx, store, meta)
+	})
+}
+
+func checkResumeMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
+	locked, err := writerLockStatus(meta.id)
+	if err != nil {
+		return resumeCheckMsg{err: fmt.Errorf("check writer lock for session %s: %w", meta.id, err), requestMeta: meta}
 	}
+	if locked {
+		return resumeCheckMsg{conversation: Conversation{Thread: Thread{ID: meta.id, Active: true}}, requestMeta: meta}
+	}
+	conversation, err := store.Read(ctx, meta.id)
+	return resumeCheckMsg{conversation: conversation, err: err, requestMeta: meta}
 }
 
 func deleteThread(store SessionStore, scope ListScope, cwd, id string) tea.Cmd {
-	return func() tea.Msg {
-		if err := store.Delete(context.Background(), id); err != nil {
-			return deletedMsg{err: deleteError(err)}
-		}
-		threads, err := store.List(context.Background(), scope, cwd)
-		if err != nil {
-			return deletedMsg{err: fmt.Errorf("deleted session %s, but reload failed: %w", id, err)}
-		}
-		for _, thread := range threads {
-			if thread.ID == id {
-				return deletedMsg{err: fmt.Errorf("session %s is still present after deletion", id)}
-			}
-		}
-		return deletedMsg{threads: threads}
+	return deleteThreadWithMeta(store, requestMeta{scope: scope, cwd: cwd, id: id})
+}
+
+func deleteThreadWithMeta(store SessionStore, meta requestMeta) tea.Cmd {
+	return withAsyncRequest(func(ctx context.Context) tea.Msg {
+		return deleteThreadMessage(ctx, store, meta)
+	})
+}
+
+func deleteThreadMessage(ctx context.Context, store SessionStore, meta requestMeta) tea.Msg {
+	locked, err := writerLockStatus(meta.id)
+	if err != nil {
+		return deletedMsg{err: fmt.Errorf("check writer lock for session %s: %w", meta.id, err), requestMeta: meta}
 	}
+	if locked {
+		return deletedMsg{err: sessionInUseError(), requestMeta: meta}
+	}
+	conversation, err := store.Read(ctx, meta.id)
+	if err != nil {
+		return deletedMsg{err: err, requestMeta: meta}
+	}
+	if conversation.Thread.Active {
+		return deletedMsg{err: sessionInUseError(), requestMeta: meta}
+	}
+	descendants, err := store.ListDescendants(ctx, meta.id)
+	if err != nil {
+		return deletedMsg{err: fmt.Errorf("cannot verify descendants of session %s: %w", meta.id, err), requestMeta: meta}
+	}
+	if len(descendants) > 0 {
+		return deletedMsg{err: descendantSessionError(meta.id, descendants), requestMeta: meta}
+	}
+	// This is the final best-effort check. The app-server delete API has no
+	// leaf-only precondition, so another client may still create a descendant
+	// before thread/delete runs.
+	deleteErr := store.Delete(ctx, meta.id)
+	page, listErr := store.List(ctx, ThreadListRequest{
+		Scope: meta.scope, CWD: meta.cwd, Cursor: meta.cursor,
+		Limit: defaultThreadPageSize, Query: meta.query, SearchPages: meta.searchPages,
+	})
+	if listErr != nil {
+		if deleteErr != nil {
+			return deletedMsg{err: fmt.Errorf("delete failed (%v); reload failed: %w", deleteError(deleteErr), listErr), requestMeta: meta}
+		}
+		return deletedMsg{err: fmt.Errorf("deleted session %s, but reload failed: %w", meta.id, listErr), requestMeta: meta}
+	}
+	if deleteErr != nil {
+		return deletedMsg{page: page, err: deleteError(deleteErr), requestMeta: meta}
+	}
+	for _, thread := range page.Threads {
+		if thread.ID == meta.id {
+			return deletedMsg{page: page, err: fmt.Errorf("session %s is still present after deletion", meta.id), requestMeta: meta}
+		}
+	}
+	return deletedMsg{page: page, requestMeta: meta}
+}
+
+func descendantSessionError(id string, descendants []Thread) error {
+	return fmt.Errorf("session %s has %d descendant session(s); delete is unavailable", id, len(descendants))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -150,11 +406,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMsg:
 		return m.updateMouse(msg)
 	case threadsLoadedMsg:
+		if !m.matchesRequest(msg.requestMeta, false) {
+			return m, nil
+		}
 		m.loading = false
+		m.deleting = false
 		m.err = msg.err
 		if msg.err == nil {
-			m.threads = msg.threads
+			page := msg.page
+			if msg.page.Threads == nil && msg.page.NextCursor == "" && !msg.page.Incomplete {
+				page.Threads = msg.threads
+			}
+			m.threads = append([]Thread(nil), page.Threads...)
+			m.pageCursor = msg.requestMeta.cursor
+			m.pendingCursor = msg.requestMeta.cursor
+			m.pendingSearchPages = msg.requestMeta.searchPages
+			m.pageSearchStart = msg.requestMeta.searchPages
+			if page.ScannedPages > 0 {
+				m.searchPages = msg.requestMeta.searchPages + page.ScannedPages
+			} else {
+				m.searchPages = msg.requestMeta.searchPages
+			}
+			m.nextCursor = page.NextCursor
+			m.searchIncomplete = page.Incomplete
+			if msg.requestMeta.generation != 0 && page.NextCursor != "" &&
+				(page.NextCursor == msg.requestMeta.cursor || containsCursor(m.previousCursors, page.NextCursor)) {
+				m.err = fmt.Errorf("thread/list cursor cycle detected at %q", page.NextCursor)
+				m.threads = nil
+				m.filtered = nil
+				return m, nil
+			}
 			m.sortThreads()
+			if msg.requestMeta.generation != 0 {
+				if m.selectPageEnd && len(m.threads) > 0 {
+					m.selected = len(m.threads) - 1
+				} else if !m.selectPageEnd {
+					m.selected = 0
+				}
+			}
+			m.selectPageEnd = false
 			m.applyFilter()
 			m.hasConversation = false
 			if len(m.filtered) > 0 {
@@ -162,12 +452,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.selected < 0 {
 					m.selected = 0
 				}
-				return m, readConversation(m.store, m.filtered[m.selected].ID)
+				return m, m.beginConversation(m.filtered[m.selected].ID)
 			}
 			m.selected = 0
 		}
 		return m, nil
 	case conversationLoadedMsg:
+		if !m.matchesRequest(msg.requestMeta, true) || (msg.err == nil && msg.requestMeta.id != "" && msg.conversation.Thread.ID != msg.requestMeta.id) {
+			return m, nil
+		}
 		m.err = msg.err
 		if msg.err == nil {
 			if selected, ok := m.selectedThread(); ok && selected.ID == msg.conversation.Thread.ID {
@@ -185,6 +478,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case deleteCheckMsg:
+		if !m.matchesRequest(msg.requestMeta, true) {
+			return m, nil
+		}
 		m.checkingDelete = false
 		m.err = msg.err
 		if msg.err == nil {
@@ -196,6 +492,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case resumeCheckMsg:
+		if !m.matchesRequest(msg.requestMeta, true) {
+			return m, nil
+		}
 		m.checkingResume = false
 		m.err = msg.err
 		if msg.err == nil {
@@ -216,20 +515,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case deletedMsg:
+		if !m.matchesRequest(msg.requestMeta, true) {
+			return m, nil
+		}
 		m.confirmDelete = false
 		m.loading = false
+		m.deleting = false
 		m.err = msg.err
-		if msg.err == nil {
-			m.threads = msg.threads
-			m.selected = min(m.selected, max(0, len(msg.threads)-1))
+		// A failed delete can still have completed remotely. Apply a refreshed
+		// page even when the delete result is an error so the UI never presents
+		// an unconditionally stale list.
+		page := msg.page
+		if msg.page.Threads == nil && msg.page.NextCursor == "" && !msg.page.Incomplete {
+			page.Threads = msg.threads
+		}
+		if page.Threads != nil || msg.err == nil {
+			m.threads = append([]Thread(nil), page.Threads...)
+			m.nextCursor = page.NextCursor
+			m.pageCursor = msg.requestMeta.cursor
+			m.pendingCursor = msg.requestMeta.cursor
+			m.pendingSearchPages = msg.requestMeta.searchPages
+			m.pageSearchStart = msg.requestMeta.searchPages
+			if page.ScannedPages > 0 {
+				m.searchPages = msg.requestMeta.searchPages + page.ScannedPages
+			} else {
+				m.searchPages = msg.requestMeta.searchPages
+			}
+			m.searchIncomplete = page.Incomplete
+			m.selected = min(m.selected, max(0, len(m.threads)-1))
 			if m.selected < 0 {
 				m.selected = 0
 			}
 			m.selectedByScope[scopeIndex(m.scope)] = m.selected
+			m.sortThreads()
 			m.applyFilter()
 			m.hasConversation = false
-			if len(m.filtered) > 0 {
-				return m, readConversation(m.store, m.filtered[m.selected].ID)
+			if msg.err == nil && len(m.filtered) > 0 {
+				return m, m.beginConversation(m.filtered[m.selected].ID)
 			}
 		}
 		return m, nil
@@ -259,6 +581,9 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.checkingDelete {
 		return m, nil
 	}
+	if m.deleting {
+		return m, nil
+	}
 	if m.checkingResume {
 		return m, nil
 	}
@@ -266,8 +591,13 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "y":
 			if thread, ok := m.selectedThread(); ok && !thread.Active {
+				meta := m.nextRequest(thread.ID)
+				ctx, cancel := m.beginAsyncRequest()
 				m.loading = true
-				return m, deleteThread(m.store, m.scope, m.cwd, thread.ID)
+				m.deleting = true
+				return m, withManagedRequest(ctx, cancel, func(ctx context.Context) tea.Msg {
+					return deleteThreadMessage(ctx, m.store, meta)
+				})
 			}
 		case "n", "esc":
 			m.confirmDelete = false
@@ -275,23 +605,26 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.searching {
+		previousID := m.selectedID()
 		switch msg.Type {
 		case tea.KeyEsc:
 			m.searching = false
 			m.query = ""
 			m.applyFilter()
+			return m, m.beginListLoad()
 		case tea.KeyEnter:
 			m.searching = false
+			return m, m.beginListLoad()
 		case tea.KeyBackspace:
 			if len(m.query) > 0 {
-				m.query = m.query[:len(m.query)-1]
+				m.query = dropLastRune(m.query)
 				m.applyFilter()
 			}
 		case tea.KeyRunes:
 			m.query += string(msg.Runes)
 			m.applyFilter()
 		}
-		return m, nil
+		return m, m.conversationAfterSelectionChange(previousID)
 	}
 	if key == "enter" {
 		if m.loading {
@@ -306,7 +639,11 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.checkingResume = true
-		return m, checkResume(m.store, thread.ID)
+		meta := m.nextRequest(thread.ID)
+		ctx, cancel := m.beginAsyncRequest()
+		return m, withManagedRequest(ctx, cancel, func(ctx context.Context) tea.Msg {
+			return checkResumeMessage(ctx, m.store, meta)
+		})
 	}
 	switch msg.Type {
 	case tea.KeyCtrlC:
@@ -355,8 +692,9 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.scopeVisited[targetScope] = true
 		}
 		m.selected = m.selectedByScope[targetScope]
+		m.clearListState()
 		m.loading, m.err = true, nil
-		return m, loadThreads(m.store, m.scope, m.cwd)
+		return m, m.beginListLoad()
 	case "p":
 		m.showConversationPreview = !m.showConversationPreview
 		if !m.showConversationPreview {
@@ -364,8 +702,7 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "r":
-		m.loading, m.err = true, nil
-		return m, loadThreads(m.store, m.scope, m.cwd)
+		return m, m.beginListLoad()
 	case "d":
 		thread, ok := m.selectedThread()
 		if !ok {
@@ -375,7 +712,11 @@ func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.err = sessionInUseError()
 		} else {
 			m.checkingDelete = true
-			return m, checkDelete(m.store, thread.ID)
+			meta := m.nextRequest(thread.ID)
+			ctx, cancel := m.beginAsyncRequest()
+			return m, withManagedRequest(ctx, cancel, func(ctx context.Context) tea.Msg {
+				return checkDeleteMessage(ctx, m.store, meta)
+			})
 		}
 	}
 	return m, nil
@@ -386,6 +727,9 @@ func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	leftWidth, _ := m.paneWidths()
+	if !m.showConversationPreview {
+		leftWidth = m.width
+	}
 	if tea.MouseEvent(msg).IsWheel() {
 		if msg.X < leftWidth {
 			m.pane = listPane
@@ -431,16 +775,16 @@ func (m model) selectThread(index int) (tea.Model, tea.Cmd) {
 	m.ensureListVisible()
 	m.hasConversation = false
 	m.err = nil
-	return m, readConversation(m.store, m.filtered[index].ID)
+	return m, m.beginConversation(m.filtered[index].ID)
 }
 
 func (m model) listIndexAt(y int) int {
 	// The header occupies row 0 and the list border occupies row 1. The
 	// first thread's title starts at row 2.
-	row := y - 2
-	if row < 0 {
+	if y < 2 || y >= 2+m.bodyHeight() {
 		return -1
 	}
+	row := y - 2
 	for index := m.listOffset; index < len(m.filtered); index++ {
 		rowCount := m.listRowHeight(index)
 		if row < rowCount {
@@ -457,10 +801,26 @@ func (m model) moveSelection(delta int) (tea.Model, tea.Cmd) {
 	}
 	next := m.selected + delta
 	if next < 0 {
-		next = len(m.filtered) - 1
+		if len(m.previousCursors) == 0 {
+			return m, nil
+		}
+		last := len(m.previousCursors) - 1
+		cursor := m.previousCursors[last]
+		m.previousCursors = m.previousCursors[:last]
+		searchPages := 0
+		if last < len(m.previousSearchPages) {
+			searchPages = m.previousSearchPages[last]
+			m.previousSearchPages = m.previousSearchPages[:last]
+		}
+		return m, m.beginPageLoadWithSearchPages(cursor, true, searchPages)
 	}
 	if next >= len(m.filtered) {
-		next = 0
+		if m.nextCursor == "" || m.searchIncomplete {
+			return m, nil
+		}
+		m.previousCursors = append(m.previousCursors, m.pageCursor)
+		m.previousSearchPages = append(m.previousSearchPages, m.pageSearchStart)
+		return m, m.beginPageLoadWithSearchPages(m.nextCursor, false, m.searchPages)
 	}
 	if next == m.selected {
 		return m, nil
@@ -470,7 +830,33 @@ func (m model) moveSelection(delta int) (tea.Model, tea.Cmd) {
 	m.ensureListVisible()
 	m.hasConversation = false
 	m.err = nil
-	return m, readConversation(m.store, m.filtered[m.selected].ID)
+	return m, m.beginConversation(m.filtered[m.selected].ID)
+}
+
+func (m *model) selectedID() string {
+	thread, ok := m.selectedThread()
+	if !ok {
+		return ""
+	}
+	return thread.ID
+}
+
+func (m *model) conversationAfterSelectionChange(previousID string) tea.Cmd {
+	currentID := m.selectedID()
+	if currentID == previousID {
+		return nil
+	}
+	m.hasConversation = false
+	m.err = nil
+	if currentID == "" {
+		if m.requestCancel != nil {
+			m.requestCancel()
+			m.requestCancel = nil
+		}
+		m.requestGeneration++
+		return nil
+	}
+	return m.beginConversation(currentID)
 }
 
 func scopeIndex(scope ListScope) int {
@@ -478,6 +864,15 @@ func scopeIndex(scope ListScope) int {
 		return 1
 	}
 	return 0
+}
+
+func containsCursor(cursors []string, cursor string) bool {
+	for _, value := range cursors {
+		if value == cursor {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *model) selectedThread() (Thread, bool) {
@@ -602,13 +997,16 @@ func (m model) renderBaseView() string {
 	accent := lipgloss.Color("#F59E0B")
 	muted := lipgloss.NewStyle().Foreground(lipgloss.Color("#777777"))
 	title := lipgloss.NewStyle().Bold(true).Foreground(accent).Render("cos")
-	scope := "sessions in current working directory: " + m.cwd
+	scope := "sessions in current working directory: " + sanitizeSingleLine(m.cwd)
 	if m.scope == AllThreads {
 		scope = "all sessions"
 	}
 	header := title + "  " + muted.Render(scope)
 	if m.searching {
-		header += "  /" + m.query
+		header += "  /" + sanitizeSingleLine(m.query)
+	}
+	if m.searchIncomplete {
+		header += "  " + muted.Render("search incomplete (100-page limit)")
 	}
 	header = lipgloss.NewStyle().Width(max(1, m.width)).MaxHeight(1).Render(header)
 
@@ -682,7 +1080,7 @@ func (m model) renderResumeChecking() string {
 func (m model) renderErrorPopup() string {
 	dialogWidth := min(72, max(1, m.width-8))
 	contentWidth := max(1, dialogWidth-4)
-	message := lipgloss.NewStyle().Width(contentWidth).Foreground(lipgloss.Color("#F25D94")).Render(m.err.Error())
+	message := lipgloss.NewStyle().Width(contentWidth).Foreground(lipgloss.Color("#F25D94")).Render(sanitizeTerminalText(m.err.Error(), true))
 	actions := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(
 		lipgloss.NewStyle().Bold(true).Render("Enter / Esc") + " close",
 	)
@@ -789,7 +1187,7 @@ func (m model) renderList(width int) string {
 				row = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#F59E0B")).Background(lipgloss.Color("#4B5563")).Render(row)
 			}
 			b.WriteString(row + "\n")
-			metadata := "   " + mutedText(formatTime(thread.Updated)) + "  " + mutedText(thread.CWD)
+			metadata := "   " + mutedText(formatTime(thread.Updated)) + "  " + mutedText(sanitizeSingleLine(thread.CWD))
 			b.WriteString(fitLine(metadata, contentWidth) + "\n")
 			if m.hasPreviewRow(thread) {
 				preview := "   " + mutedText(oneLine(thread.Preview))
@@ -828,7 +1226,10 @@ func (m model) conversationText() string {
 	var b strings.Builder
 	name := displayTitle(m.conversation.Thread)
 	b.WriteString(name + "\n")
-	b.WriteString(mutedText(m.conversation.Thread.CWD+"  "+formatTime(m.conversation.Thread.Updated)) + "\n\n")
+	b.WriteString(mutedText(sanitizeSingleLine(m.conversation.Thread.CWD)+"  "+formatTime(m.conversation.Thread.Updated)) + "\n\n")
+	if m.conversation.Truncated {
+		b.WriteString(mutedText("Conversation truncated to the latest 100 turns or 1 MiB.") + "\n\n")
+	}
 	for _, item := range m.conversation.Items {
 		label := "assistant"
 		if item.Kind == "user" {
@@ -838,7 +1239,7 @@ func (m model) conversationText() string {
 			label = "activity"
 		}
 		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(kindColor(item.Kind)).Render(label) + "\n")
-		b.WriteString(item.Text + "\n\n")
+		b.WriteString(sanitizeTerminalText(item.Text, true) + "\n\n")
 	}
 	if len(m.conversation.Items) == 0 {
 		b.WriteString(mutedText("No displayable conversation items."))
@@ -860,6 +1261,9 @@ func kindColor(kind string) lipgloss.Color {
 func (m model) renderStatus() string {
 	if m.searching {
 		return "type to search  Enter apply  Esc cancel"
+	}
+	if m.searchIncomplete {
+		return mutedText("search incomplete after 100 pages  ") + mutedText("j/k ↑/↓ select  r reload  q quit")
 	}
 	return mutedText("j/k ↑/↓ select  Tab pane  / search  a scope  p preview  r reload  Enter resume  d delete  q quit")
 }
@@ -908,4 +1312,12 @@ func truncate(value string, width int) string {
 		return value
 	}
 	return string(runes[:width-1]) + "…"
+}
+
+func dropLastRune(value string) string {
+	_, size := utf8.DecodeLastRuneInString(value)
+	if size == 0 {
+		return value
+	}
+	return value[:len(value)-size]
 }
