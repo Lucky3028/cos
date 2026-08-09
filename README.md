@@ -23,10 +23,10 @@ Codex のセッションを一覧・閲覧・再開・削除する Linux 向け 
 
 ## インストール
 
-リポジトリから `mise` task を使ってインストールできます。
+Go があれば、リポジトリをチェックアウトせずにインストールできます。
 
 ```sh
-mise run install
+go install github.com/Lucky3028/cos/cmd/cos@latest
 ```
 
 または、リポジトリを取得してビルドします。
