@@ -12,6 +12,7 @@ permissions: {}
 
 jobs:
   gitleaks:
+    name: gitleaks - secret scan
     permissions:
       contents: read
       pull-requests: read

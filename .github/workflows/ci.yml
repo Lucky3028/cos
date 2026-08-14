@@ -12,6 +12,7 @@ permissions: {}
 
 jobs:
   ci:
+    name: Go CI
     permissions:
       contents: read
     runs-on: ubuntu-latest

@@ -12,6 +12,7 @@ permissions: {}
 
 jobs:
   ghasec:
+    name: ghasec - GitHub Actions security scan
     permissions:
       contents: read
     runs-on: ubuntu-latest
