@@ -1,0 +1,34 @@
+name: ghasec
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  ghasec:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up ghasec
+        uses: koki-develop/setup-ghasec@dcd08c7ea5af04eb641f695c8169e3efb0c22b32 # v1.0.1
+        with:
+          version: v0.17.0
+          token: ${{ github.token }}
+
+      - name: Run ghasec
+        run: ghasec --online --format github-actions
+        env:
+          GHASEC_GITHUB_TOKEN: ${{ github.token }}
