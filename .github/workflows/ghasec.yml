@@ -22,13 +22,9 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up ghasec
-        uses: koki-develop/setup-ghasec@dcd08c7ea5af04eb641f695c8169e3efb0c22b32 # v1.0.1
+      - name: Run ghasec
+        uses: koki-develop/ghasec-action@2810775d2a300cb3fd9583c36c05b5ee3310c5b8 # v1.1.1
         with:
           version: v0.17.0
-          token: ${{ github.token }}
-
-      - name: Run ghasec
-        run: ghasec --online --format github-actions
-        env:
-          GHASEC_GITHUB_TOKEN: ${{ github.token }}
+          github-token: ${{ github.token }}
+          online: true
