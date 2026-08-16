@@ -2,32 +2,36 @@ package tui
 
 import (
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 	"unicode/utf8"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	var content string
 	if m.width == 0 {
-		return "Loading cos…"
+		content = "Loading cos…"
+	} else {
+		content = m.renderBaseView()
+		if m.err != nil {
+			content = overlayPopup(content, m.renderErrorPopup(), m.width, m.height)
+		} else if m.checkingDelete {
+			content = overlayPopup(content, m.renderDeleteChecking(), m.width, m.height)
+		} else if m.checkingResume {
+			content = overlayPopup(content, m.renderResumeChecking(), m.width, m.height)
+		} else if m.confirmDelete {
+			content = overlayPopup(content, m.renderDeleteConfirmation(), m.width, m.height)
+		}
 	}
-	base := m.renderBaseView()
-	if m.err != nil {
-		return overlayPopup(base, m.renderErrorPopup(), m.width, m.height)
-	}
-	if m.checkingDelete {
-		return overlayPopup(base, m.renderDeleteChecking(), m.width, m.height)
-	}
-	if m.checkingResume {
-		return overlayPopup(base, m.renderResumeChecking(), m.width, m.height)
-	}
-	if m.confirmDelete {
-		return overlayPopup(base, m.renderDeleteConfirmation(), m.width, m.height)
-	}
-	return base
+	view := tea.NewView(content)
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
+	return view
 }
 
 func (m model) renderBaseView() string {
@@ -151,7 +155,7 @@ func (m model) conversationText() string {
 	return b.String()
 }
 
-func kindColor(kind ConversationItemKind) lipgloss.Color {
+func kindColor(kind ConversationItemKind) color.Color {
 	switch kind {
 	case "user":
 		return lipgloss.Color("#04B575")

@@ -3,7 +3,7 @@ package tui
 import (
 	"fmt"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m model) updateThreadsLoaded(msg threadsLoadedMsg) (tea.Model, tea.Cmd) {

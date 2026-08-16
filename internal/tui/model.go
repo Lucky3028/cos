@@ -3,8 +3,8 @@ package tui
 import (
 	"context"
 
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 type pane int
@@ -121,7 +121,7 @@ func newModel(store SessionStore, cwd string) model {
 	ctx, cancel := context.WithTimeout(context.Background(), asyncRequestTimeout)
 	return model{
 		store: store, cwd: cwd, scope: CurrentDirectory, pane: listPane, loading: true,
-		viewport: viewport.New(1, 1), scopeVisited: [2]bool{true, false}, showConversationPreview: true,
+		viewport: viewport.New(viewport.WithWidth(1), viewport.WithHeight(1)), scopeVisited: [2]bool{true, false}, showConversationPreview: true,
 		requestGeneration: 1, requestContext: ctx, requestCancel: cancel,
 	}
 }

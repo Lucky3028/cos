@@ -1,7 +1,7 @@
 package tui
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
@@ -12,16 +12,17 @@ func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if !m.showConversationPreview {
 		leftWidth = m.width
 	}
-	if tea.MouseEvent(msg).IsWheel() {
+	mouse := msg.Mouse()
+	if _, ok := msg.(tea.MouseWheelMsg); ok {
 		return m.updateWheel(msg, leftWidth)
 	}
-	if msg.Button != tea.MouseButtonLeft || msg.Action != tea.MouseActionPress {
+	if _, ok := msg.(tea.MouseClickMsg); !ok || mouse.Button != tea.MouseLeft {
 		return m, nil
 	}
-	if msg.X < leftWidth {
+	if mouse.X < leftWidth {
 		// Clicking the left pane also restores focus on its border and empty area.
 		m.pane = listPane
-		index := m.listIndexAt(msg.Y)
+		index := m.listIndexAt(mouse.Y)
 		if index >= 0 && index < len(m.visibleThreads) {
 			return m.selectThread(index)
 		}
@@ -32,12 +33,13 @@ func (m model) updateMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateWheel(msg tea.MouseMsg, leftWidth int) (tea.Model, tea.Cmd) {
-	if msg.X < leftWidth {
+	mouse := msg.Mouse()
+	if mouse.X < leftWidth {
 		m.pane = listPane
-		switch msg.Button {
-		case tea.MouseButtonWheelUp:
+		switch mouse.Button {
+		case tea.MouseWheelUp:
 			return m.moveSelection(-1)
-		case tea.MouseButtonWheelDown:
+		case tea.MouseWheelDown:
 			return m.moveSelection(1)
 		default:
 			return m, nil

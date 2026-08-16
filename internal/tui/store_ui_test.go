@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -47,7 +47,7 @@ func TestThreadTitleUsesNameAndPreviewFallback(t *testing.T) {
 func TestHeaderSanitizesLaunchCWDOnlyForDisplay(t *testing.T) {
 	m := newModel(nil, "/work/\x1b]0;unsafe\a\nproject")
 	m.width, m.height, m.loading = 80, 12, false
-	view := ansi.Strip(m.View())
+	view := ansi.Strip(m.View().Content)
 	header := strings.Split(view, "\n")[0]
 	if strings.ContainsAny(header, "\x1b\a\r") {
 		t.Fatalf("header retained terminal control characters: %q", header)
@@ -185,7 +185,7 @@ func TestIdleThreadEnterRequestsResumeAndQuits(t *testing.T) {
 	m.threads = store.threads
 	m.applyFilter()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(model)
 	if cmd == nil || !m.checkingResume {
 		t.Fatalf("resume check was not started: checking=%v cmd=%v", m.checkingResume, cmd != nil)
@@ -207,7 +207,7 @@ func TestActiveThreadCannotBeResumed(t *testing.T) {
 	m.threads = store.threads
 	m.applyFilter()
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(model)
 	if cmd != nil || m.resumeRequested || m.checkingResume {
 		t.Fatalf("active resume state = requested:%v checking:%v cmd:%v", m.resumeRequested, m.checkingResume, cmd != nil)
@@ -238,7 +238,7 @@ func TestWriterLockPreventsResume(t *testing.T) {
 	m.loading = false
 	m.threads = store.threads
 	m.applyFilter()
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m = updated.(model)
 	if cmd == nil || !m.checkingResume {
 		t.Fatalf("resume check was not started: checking=%v cmd=%v", m.checkingResume, cmd != nil)
@@ -313,7 +313,7 @@ func TestEnterDoesNotResumeDuringModalOrSearch(t *testing.T) {
 			m.threads = store.threads
 			m.applyFilter()
 			setup(&m)
-			updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 			result := updated.(model)
 			if result.resumeRequested || result.checkingResume {
 				t.Fatalf("resume started: requested:%v checking:%v cmd:%v", result.resumeRequested, result.checkingResume, cmd != nil)
@@ -345,8 +345,8 @@ func TestDeleteChecksForActiveThreadBeforeConfirmation(t *testing.T) {
 	if len(store.deleted) != 0 {
 		t.Fatalf("active session was deleted: %#v", store.deleted)
 	}
-	if !strings.Contains(m.View(), "currently in use") {
-		t.Fatalf("in-use error modal missing: %q", m.View())
+	if !strings.Contains(m.View().Content, "currently in use") {
+		t.Fatalf("in-use error modal missing: %q", m.View().Content)
 	}
 }
 
@@ -594,7 +594,7 @@ func TestSearchBackspaceRemovesOneUnicodeRune(t *testing.T) {
 	m.threads = []Thread{{ID: "session", Title: "日本語"}}
 	m.applyFilter()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace})
 	m = updated.(model)
 	if m.query != "日" || len(m.visibleThreads) != 1 || m.visibleThreads[0].ID != "session" {
 		t.Fatalf("unicode backspace state = query:%q filtered:%#v", m.query, m.visibleThreads)
@@ -607,7 +607,7 @@ func TestHiddenPreviewUsesFullWidthForMouseSelection(t *testing.T) {
 	m.showConversationPreview = false
 	m.threads = makeTestThreads(3)
 	m.applyFilter()
-	updated, _ := m.Update(tea.MouseMsg{X: 70, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ := m.Update(tea.MouseClickMsg{X: 70, Y: 5, Button: tea.MouseLeft})
 	m = updated.(model)
 	if m.pane != listPane || m.selectedIndex != 1 {
 		t.Fatalf("full-width click did not select list item: pane=%v selected=%d", m.pane, m.selectedIndex)
@@ -687,7 +687,7 @@ func TestDeleteErrorIsRenderedAsModal(t *testing.T) {
 	}
 	updated, _ = m.Update(cmd().(deletedMsg))
 	m = updated.(model)
-	view := m.View()
+	view := m.View().Content
 	if m.confirmDelete || m.err == nil {
 		t.Fatalf("delete error state = confirmDelete:%v err:%v", m.confirmDelete, m.err)
 	}
@@ -762,31 +762,31 @@ func TestMouseClickSelectsThreadAndWheelScrollsConversation(t *testing.T) {
 	m.threads = makeTestThreads(3)
 	m.applyFilter()
 
-	updated, _ := m.Update(tea.MouseMsg{X: 2, Y: 5, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ := m.Update(tea.MouseClickMsg{X: 2, Y: 5, Button: tea.MouseLeft})
 	m = updated.(model)
 	if m.selectedIndex != 1 || m.pane != listPane {
 		t.Fatalf("mouse selected = %d, pane = %v", m.selectedIndex, m.pane)
 	}
 	m.pane = conversationPane
-	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 5, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	updated, _ = m.Update(tea.MouseWheelMsg{X: 2, Y: 5, Button: tea.MouseWheelDown})
 	m = updated.(model)
 	if m.pane != listPane || m.selectedIndex != 2 {
 		t.Fatalf("left wheel did not select list pane: pane=%v selected=%d", m.pane, m.selectedIndex)
 	}
 	m.pane = conversationPane
-	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 19, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+	updated, _ = m.Update(tea.MouseClickMsg{X: 2, Y: 19, Button: tea.MouseLeft})
 	m = updated.(model)
 	if m.pane != listPane {
 		t.Fatal("clicking the left pane's empty area did not restore focus")
 	}
 
 	m.hasConversation = true
-	m.viewport.Height = 2
+	m.viewport.SetHeight(2)
 	m.viewport.SetContent(strings.Repeat("conversation\n", 20))
-	updated, _ = m.Update(tea.MouseMsg{X: 50, Y: 5, Button: tea.MouseButtonWheelDown, Action: tea.MouseActionPress})
+	updated, _ = m.Update(tea.MouseWheelMsg{X: 50, Y: 5, Button: tea.MouseWheelDown})
 	m = updated.(model)
-	if m.pane != conversationPane || m.viewport.YOffset == 0 {
-		t.Fatalf("mouse wheel did not scroll: pane=%v offset=%d", m.pane, m.viewport.YOffset)
+	if m.pane != conversationPane || m.viewport.YOffset() == 0 {
+		t.Fatalf("mouse wheel did not scroll: pane=%v offset=%d", m.pane, m.viewport.YOffset())
 	}
 }
 
@@ -798,7 +798,7 @@ func TestMouseClickOutsideVisibleListDoesNotSelectHiddenThread(t *testing.T) {
 	m.selectedIndex = 0
 
 	for _, y := range []int{m.height - 2, m.height - 1} {
-		updated, _ := m.Update(tea.MouseMsg{X: 2, Y: y, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
+		updated, _ := m.Update(tea.MouseClickMsg{X: 2, Y: y, Button: tea.MouseLeft})
 		m = updated.(model)
 		if m.selectedIndex != 0 {
 			t.Fatalf("click at y=%d selected hidden thread %d", y, m.selectedIndex)
@@ -821,7 +821,7 @@ func TestViewFitsTerminalHeightWithManyThreads(t *testing.T) {
 		m.threads = append(m.threads, Thread{ID: string(rune('a' + i)), Title: "thread"})
 	}
 	m.applyFilter()
-	if height := lipgloss.Height(m.View()); height > m.height {
+	if height := lipgloss.Height(m.View().Content); height > m.height {
 		t.Fatalf("view height = %d, terminal height = %d", height, m.height)
 	}
 
@@ -832,15 +832,15 @@ func TestViewFitsTerminalHeightWithManyThreads(t *testing.T) {
 		m.conversation.Items = append(m.conversation.Items, ConversationItem{Kind: "assistant", Text: "a long conversation line that should scroll inside the viewport"})
 	}
 	m.viewport.SetContent(m.conversationText())
-	if height := lipgloss.Height(m.View()); height > m.height {
+	if height := lipgloss.Height(m.View().Content); height > m.height {
 		t.Fatalf("conversation view height = %d, terminal height = %d", height, m.height)
 	}
 
 	m.confirmDelete = true
-	if height := lipgloss.Height(m.View()); height != m.height {
+	if height := lipgloss.Height(m.View().Content); height != m.height {
 		t.Fatalf("confirmation height = %d, terminal height = %d", height, m.height)
 	}
-	view := m.View()
+	view := m.View().Content
 	if !strings.Contains(view, "Delete session?") || !strings.Contains(view, "y") {
 		t.Fatal("confirmation popup is missing")
 	}
@@ -864,7 +864,7 @@ func TestConversationPaneHasBottomBorder(t *testing.T) {
 	if len(lines) == 0 || !strings.Contains(lines[len(lines)-1], "┘") {
 		t.Fatalf("conversation bottom border missing; last line = %q", lines[len(lines)-1])
 	}
-	fullLines := strings.Split(ansi.Strip(m.View()), "\n")
+	fullLines := strings.Split(ansi.Strip(m.View().Content), "\n")
 	if !strings.Contains(fullLines[len(fullLines)-2], "┘") {
 		t.Fatalf("full view right bottom border missing; line = %q", fullLines[len(fullLines)-2])
 	}
@@ -878,7 +878,7 @@ func TestViewFitsAfterWindowResize(t *testing.T) {
 		m.applyFilter()
 		m.resizeViewport()
 
-		lines := strings.Split(ansi.Strip(m.View()), "\n")
+		lines := strings.Split(ansi.Strip(m.View().Content), "\n")
 		if len(lines) > size.height {
 			t.Fatalf("size %dx%d produced %d rows", size.width, size.height, len(lines))
 		}
@@ -926,14 +926,23 @@ func TestConversationPreviewCanBeToggled(t *testing.T) {
 	m.conversation = Conversation{Thread: m.threads[0], Items: []ConversationItem{{Kind: "assistant", Text: "conversation preview"}}}
 	m.resizeViewport()
 	m.viewport.SetContent(m.conversationText())
-	if !strings.Contains(ansi.Strip(m.View()), "conversation preview") {
+	if !strings.Contains(ansi.Strip(m.View().Content), "conversation preview") {
 		t.Fatal("conversation preview is not shown by default")
 	}
 	updated, _ := m.Update(keyMsg("p"))
 	m = updated.(model)
-	if m.showConversationPreview || strings.Contains(ansi.Strip(m.View()), "conversation preview") {
+	if m.showConversationPreview || strings.Contains(ansi.Strip(m.View().Content), "conversation preview") {
 		t.Fatal("conversation preview was not hidden")
 	}
 }
 
-func keyMsg(key string) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)} }
+func keyMsg(key string) tea.KeyMsg {
+	if key == "enter" {
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	}
+	if key == "esc" {
+		return tea.KeyPressMsg{Code: tea.KeyEsc}
+	}
+	runes := []rune(key)
+	return tea.KeyPressMsg{Text: key, Code: runes[0]}
+}
