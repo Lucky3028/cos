@@ -7,10 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/Lucky3028/cos/internal/appserver"
 	"github.com/Lucky3028/cos/internal/domain"
 	"github.com/Lucky3028/cos/internal/tui"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
@@ -38,7 +38,7 @@ func main() {
 
 	store := appserver.NewDefaultStore()
 	defer func() { _ = store.Close() }()
-	program := tea.NewProgram(tui.NewModel(store, cwd), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(tui.NewModel(store, cwd))
 	finalModel, err := program.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cos: %v\n", err)

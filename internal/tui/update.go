@@ -3,7 +3,7 @@ package tui
 import (
 	"sort"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -45,8 +45,8 @@ func (m *model) resizeViewport() {
 	// The pane width includes the border and horizontal padding. Match the
 	// viewport to the actual content area so the outer frame does not wrap it
 	// a second time.
-	m.viewport.Width = max(1, right-4)
-	m.viewport.Height = m.bodyHeight()
+	m.viewport.SetWidth(max(1, right-4))
+	m.viewport.SetHeight(m.bodyHeight())
 	m.ensureListVisible()
 	if m.hasConversation {
 		m.viewport.SetContent(m.conversationText())

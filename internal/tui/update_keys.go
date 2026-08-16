@@ -3,7 +3,7 @@ package tui
 import (
 	"context"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 func (m model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -57,7 +57,7 @@ func (m model) updateDeleteModalKey(key string) (tea.Model, tea.Cmd) {
 
 func (m model) updateSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	previousThreadID := m.selectedThreadID()
-	switch msg.Type {
+	switch msg.Key().Code {
 	case tea.KeyEsc:
 		m.searching = false
 		m.query = ""
@@ -71,8 +71,8 @@ func (m model) updateSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.query = dropLastRune(m.query)
 			m.applyFilter()
 		}
-	case tea.KeyRunes:
-		m.query += string(msg.Runes)
+	default:
+		m.query += msg.Key().Text
 		m.applyFilter()
 	}
 	return m, m.conversationAfterSelectionChange(previousThreadID)
@@ -100,9 +100,7 @@ func (m model) beginResumeCheck() (tea.Model, tea.Cmd) {
 
 func (m model) updateNavigationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	switch msg.Type {
-	case tea.KeyCtrlC:
-		return m, tea.Quit
+	switch msg.Key().Code {
 	case tea.KeyTab:
 		m.pane = oppositePane(m.pane)
 		return m, nil
