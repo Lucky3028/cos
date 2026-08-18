@@ -9,6 +9,10 @@ run = "go build ./..."
 description = "Run all tests"
 run = "go test ./..."
 
+[tasks.test-cover]
+description = "Run all tests and report statement coverage"
+run = "go test -count=1 ./... -covermode=atomic -coverprofile=coverage.out && go tool cover -func=coverage.out"
+
 [tasks.test-race]
 description = "Run all tests with the race detector"
 run = "go test -race ./..."
@@ -27,7 +31,7 @@ depends = ["vet", "test"]
 
 [tasks.ci]
 description = "Run the full build and verification suite"
-depends = ["fmt", "build", "test-race", "vet"]
+depends = ["fmt", "build", "test-cover", "test-race", "vet"]
 
 [tasks.clean]
 description = "Remove Go build and test caches"

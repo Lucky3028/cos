@@ -946,3 +946,144 @@ func keyMsg(key string) tea.KeyMsg {
 	runes := []rune(key)
 	return tea.KeyPressMsg{Text: key, Code: runes[0]}
 }
+
+func TestPublicModelInitializesAndExposesResumeState(t *testing.T) {
+	store := &fakeStore{threads: []Thread{{ID: "session"}}}
+	m := NewModel(store, "/work")
+	if m.cwd != "/work" || m.scope != CurrentDirectory || !m.loading {
+		t.Fatalf("new model = %#v", m)
+	}
+	if _, requested := m.ResumeSession(); requested {
+		t.Fatal("new model unexpectedly requested resume")
+	}
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatal("Init returned nil command")
+	}
+	msg, ok := cmd().(threadsLoadedMsg)
+	if !ok || msg.err != nil || len(msg.page.Threads) != 1 {
+		t.Fatalf("Init message = %#v", msg)
+	}
+}
+
+func TestConversationLoadedRejectsWrongThreadAndAddsListMetadata(t *testing.T) {
+	m := newModel(nil, "/work")
+	m.threads = []Thread{{ID: "session", Title: "Saved title", Preview: "Saved preview"}}
+	m.applyFilter()
+	m.hasConversation = true
+	m.conversation = Conversation{Thread: Thread{ID: "old"}}
+
+	updated, _ := m.Update(conversationLoadedMsg{
+		conversation: Conversation{Thread: Thread{ID: "other"}},
+		requestMeta:  requestMeta{threadID: "session"},
+	})
+	result := updated.(model)
+	if result.conversation.Thread.ID != "old" {
+		t.Fatalf("wrong-thread response changed conversation: %#v", result.conversation)
+	}
+
+	updated, _ = result.Update(conversationLoadedMsg{
+		conversation: Conversation{Thread: Thread{ID: "session"}},
+		requestMeta:  requestMeta{threadID: "session"},
+	})
+	result = updated.(model)
+	if !result.hasConversation || result.conversation.Thread.Title != "Saved title" || result.conversation.Thread.Preview != "Saved preview" {
+		t.Fatalf("conversation metadata = %#v", result.conversation)
+	}
+}
+
+func TestConversationLoadedPreservesReadError(t *testing.T) {
+	want := errors.New("read failed")
+	m := newModel(nil, "/work")
+	m.threads = []Thread{{ID: "session"}}
+	m.applyFilter()
+	updated, _ := m.Update(conversationLoadedMsg{err: want, requestMeta: requestMeta{threadID: "session"}})
+	result := updated.(model)
+	if !errors.Is(result.err, want) || result.hasConversation {
+		t.Fatalf("error state = err:%v hasConversation:%v", result.err, result.hasConversation)
+	}
+}
+
+func TestResumeCheckFillsMissingCWDFromConversation(t *testing.T) {
+	m := newModel(nil, "/work")
+	m.threads = []Thread{{ID: "session"}}
+	m.applyFilter()
+	updated, quit := m.Update(resumeCheckMsg{
+		conversation: Conversation{Thread: Thread{ID: "session", CWD: "/saved/work"}},
+		requestMeta:  requestMeta{threadID: "session"},
+	})
+	result := updated.(model)
+	if quit == nil || !result.resumeRequested || result.resumeSession.CWD != "/saved/work" {
+		t.Fatalf("resume state = %#v quit:%v", result.resumeSession, quit != nil)
+	}
+}
+
+func TestValidateIdleSessionRejectsInvalidWriterLockPath(t *testing.T) {
+	_, err := validateIdleSession(context.Background(), &fakeStore{}, "\x00", false)
+	if err == nil || !strings.Contains(err.Error(), "check writer lock") {
+		t.Fatalf("invalid writer lock error = %v", err)
+	}
+}
+
+func TestCancelActiveRequestInvokesAndClearsCancelFunc(t *testing.T) {
+	m := newModel(nil, "/work")
+	called := false
+	m.requestCancel = func() { called = true }
+	m.cancelActiveRequest()
+	if !called || m.requestCancel != nil {
+		t.Fatalf("cancel state = called:%v cancel:%v", called, m.requestCancel != nil)
+	}
+}
+
+func TestUpdateDeleteCheckRejectsActiveConversation(t *testing.T) {
+	m := newModel(nil, "/work")
+	m.threads = []Thread{{ID: "session"}}
+	m.applyFilter()
+	m.checkingDelete = true
+	updated, _ := m.Update(deleteCheckMsg{
+		conversation: Conversation{Thread: Thread{ID: "session", Active: true}},
+		requestMeta:  requestMeta{threadID: "session"},
+	})
+	result := updated.(model)
+	if result.confirmDelete || result.checkingDelete || result.err == nil {
+		t.Fatalf("delete check state = confirm:%v checking:%v err:%v", result.confirmDelete, result.checkingDelete, result.err)
+	}
+}
+
+func TestDeletedMessageWithErrorWithoutPagePreservesError(t *testing.T) {
+	want := errors.New("delete failed")
+	m := newModel(nil, "/work")
+	m.threads = []Thread{{ID: "session"}}
+	m.applyFilter()
+	updated, _ := m.Update(deletedMsg{err: want, requestMeta: requestMeta{threadID: "session"}})
+	result := updated.(model)
+	if !errors.Is(result.err, want) || result.loading || result.deleting {
+		t.Fatalf("deleted error state = err:%v loading:%v deleting:%v", result.err, result.loading, result.deleting)
+	}
+}
+
+func TestViewRendersCheckingPopups(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		setup func(*model)
+		want  string
+	}{
+		{name: "delete", setup: func(m *model) { m.checkingDelete = true }, want: "Checking session"},
+		{name: "resume", setup: func(m *model) { m.checkingResume = true }, want: "Preparing resume"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := newModel(nil, "/work")
+			m.width, m.height, m.loading = 80, 20, false
+			test.setup(&m)
+			if view := ansi.Strip(m.View().Content); !strings.Contains(view, test.want) {
+				t.Fatalf("view = %q, want %q", view, test.want)
+			}
+		})
+	}
+}
+
+func TestOppositePane(t *testing.T) {
+	if oppositePane(listPane) != conversationPane || oppositePane(conversationPane) != listPane {
+		t.Fatal("oppositePane did not switch panes")
+	}
+}

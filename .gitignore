@@ -1,3 +1,4 @@
 # Go build artifacts
 /cos
 /dist
+/coverage.out

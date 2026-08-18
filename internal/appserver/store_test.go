@@ -352,6 +352,9 @@ func TestAppServerStoreDeleteTimeoutTreatsConfirmedAbsenceAsSuccess(t *testing.T
 	t.Setenv("COS_TEST_APP_SERVER_DELETE_HELPER", "1")
 	store := NewAppServerStore(os.Args[0])
 	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.client(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -368,6 +371,9 @@ func TestAppServerStoreDeleteTimeoutReportsUnknownWhenTargetRemains(t *testing.T
 	t.Setenv("COS_TEST_APP_SERVER_VERIFY_PRESENT", "1")
 	store := NewAppServerStore(os.Args[0])
 	t.Cleanup(func() { _ = store.Close() })
+	if _, err := store.client(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
