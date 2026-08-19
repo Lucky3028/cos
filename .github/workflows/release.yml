@@ -75,36 +75,6 @@ jobs:
           path: dist/checksums.txt.sigstore.json
           if-no-files-found: error
 
-  release:
-    name: Publish GitHub release
-    needs: [build, cosign]
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Download built artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: release-dist
-          path: dist
-
-      - name: Download cosign bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: cosign
-          path: dist
-
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          assets=(dist/*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json)
-          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --generate-notes
-
   attestation:
     name: Attest release artifacts
     needs: [build, cosign]
@@ -137,13 +107,49 @@ jobs:
 
   provenance:
     name: Generate SLSA provenance
-    needs: [build, release]
+    needs: build
     permissions:
       actions: read
+      contents: read
       id-token: write
-      contents: write
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       base64-subjects: ${{ needs.build.outputs.hashes }}
-      upload-assets: true
+      upload-assets: false
       compile-generator: true
+
+  release:
+    name: Publish GitHub release
+    needs: [build, cosign, provenance]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: dist
+
+      - name: Download cosign bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cosign
+          path: dist
+
+      - name: Download SLSA provenance
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.provenance.outputs.provenance-name }}
+          path: dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(dist/*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json dist/*.intoto.jsonl)
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes
