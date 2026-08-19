@@ -30,6 +30,14 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Collect dependency licenses
+        run: |
+          go install github.com/google/go-licenses/v2@v2.0.1
+          "$(go env GOPATH)/bin/go-licenses" save ./cmd/cos --save_path third_party_licenses
+          mkdir -p third_party_licenses/go
+          version=$(go env GOVERSION)
+          curl -Lq -o third_party_licenses/go/LICENSE --retry 5 "https://raw.githubusercontent.com/golang/go/refs/tags/go${version#go}/LICENSE"
+
       - name: Build with GoReleaser
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
