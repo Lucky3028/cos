@@ -23,7 +23,8 @@ var sanitizeSingleLine = domain.SanitizeSingleLine
 var sanitizeTerminalText = domain.SanitizeTerminalText
 
 // Version is the cos version sent to app-server and shown by the CLI.
-const Version = "0.1.0"
+// GoReleaser overrides this value with the release tag version at build time.
+var Version = "dev"
 
 const (
 	defaultThreadPageSize = domain.DefaultThreadPageSize
