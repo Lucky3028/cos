@@ -66,6 +66,33 @@ cos --version
 
 マウスのクリックとホイール操作にも対応しています。
 
+## リリース成果物の検証
+
+リリースページから成果物と検証ファイルを取得します。
+
+```sh
+VERSION=vX.Y.Z
+gh release download "$VERSION" --repo Lucky3028/cos
+```
+
+checksum と cosign の keyless 署名を検証します。`cosign` はあらかじめインストールしてください。
+
+```sh
+sha256sum --ignore-missing -c checksums.txt
+
+cosign verify-blob \
+  --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp 'https://github\.com/Lucky3028/cos/.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  checksums.txt
+```
+
+GitHub CLI を使うと、リリース成果物の Artifact Attestation も検証できます。
+
+```sh
+gh attestation verify cos_X.Y.Z_linux_amd64.tar.gz --repo Lucky3028/cos
+```
+
 ## 開発
 
 ```sh
